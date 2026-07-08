@@ -2,7 +2,14 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
     QPushButton, QComboBox, QLabel, QSpinBox, QLineEdit
 )
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, Qt
+from core.serial_device_manager import (
+    UDP_DEFAULT_PORT,
+    UDP_STREAM_REPEATS,
+    UDP_STREAM_REPEATS_MAX,
+    UDP_STREAM_REPEATS_MIN,
+    normalize_udp_host,
+)
 from core.i18n import tr
 
 
@@ -13,6 +20,10 @@ class SerialDevicePanel(QGroupBox):
     offset_changed = Signal(int)
     refresh_requested = Signal()
     auth_lic_changed = Signal(str)
+    udp_host_changed = Signal(str)
+    udp_stream_repeats_changed = Signal(int)
+    ble_scan_requested = Signal()
+    ble_device_changed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -44,6 +55,61 @@ class SerialDevicePanel(QGroupBox):
         baud_row.addWidget(self.baud_combo)
         baud_row.addStretch()
         layout.addLayout(baud_row)
+
+        # Transport mode row
+        transport_row = QHBoxLayout()
+        self.transport_label = QLabel()
+        transport_row.addWidget(self.transport_label)
+        self.transport_combo = QComboBox()
+        self.transport_combo.addItems(["Serial", "UDP", "BLE"])
+        self.transport_combo.setCurrentText("Serial")
+        transport_row.addWidget(self.transport_combo)
+        transport_row.addStretch()
+        layout.addLayout(transport_row)
+
+        # UDP target row (hidden when serial mode)
+        self.udp_row = QHBoxLayout()
+        self.udp_ip_label = QLabel()
+        self.udp_row.addWidget(self.udp_ip_label)
+        self.udp_ip_edit = QLineEdit()
+        self.udp_ip_edit.setPlaceholderText("192.168.19.123")
+        self.udp_ip_edit.setMinimumWidth(132)
+        self.udp_ip_edit.setClearButtonEnabled(True)
+        self.udp_row.addWidget(self.udp_ip_edit)
+        self.udp_port_label = QLabel()
+        self.udp_row.addWidget(self.udp_port_label)
+        self.udp_port_edit = QLineEdit(str(UDP_DEFAULT_PORT))
+        self.udp_port_edit.setReadOnly(True)
+        self.udp_port_edit.setAlignment(Qt.AlignCenter)
+        self.udp_port_edit.setFixedWidth(72)
+        self.udp_row.addWidget(self.udp_port_edit)
+        self.udp_row.addStretch()
+        layout.addLayout(self.udp_row)
+
+        # UDP reliability row (hidden when not using UDP)
+        self.udp_reliability_row = QHBoxLayout()
+        self.udp_stream_repeats_label = QLabel()
+        self.udp_reliability_row.addWidget(self.udp_stream_repeats_label)
+        self.udp_stream_repeats_spin = QSpinBox()
+        self.udp_stream_repeats_spin.setRange(UDP_STREAM_REPEATS_MIN, UDP_STREAM_REPEATS_MAX)
+        self.udp_stream_repeats_spin.setValue(UDP_STREAM_REPEATS)
+        self.udp_stream_repeats_spin.setFixedWidth(72)
+        self.udp_stream_repeats_spin.setSuffix("x")
+        self.udp_reliability_row.addWidget(self.udp_stream_repeats_spin)
+        self.udp_reliability_row.addStretch()
+        layout.addLayout(self.udp_reliability_row)
+
+        # BLE target row (hidden when not using BLE)
+        self.ble_row = QHBoxLayout()
+        self.ble_device_label = QLabel()
+        self.ble_row.addWidget(self.ble_device_label)
+        self.ble_device_combo = QComboBox()
+        self.ble_device_combo.setMinimumWidth(180)
+        self.ble_row.addWidget(self.ble_device_combo)
+        self.ble_scan_btn = QPushButton()
+        self.ble_row.addWidget(self.ble_scan_btn)
+        self.ble_row.addStretch()
+        layout.addLayout(self.ble_row)
 
         # Connect button and status
         connect_row = QHBoxLayout()
@@ -115,6 +181,7 @@ class SerialDevicePanel(QGroupBox):
 
         # Connect signals
         self.connect_btn.clicked.connect(self._on_connect_clicked)
+        self.transport_combo.currentTextChanged.connect(self._on_transport_changed)
         self.offset_spin.valueChanged.connect(self.offset_changed.emit)
         self.offset_minus_50_btn.clicked.connect(lambda: self._adjust_offset(-50))
         self.offset_minus_10_btn.clicked.connect(lambda: self._adjust_offset(-10))
@@ -122,7 +189,13 @@ class SerialDevicePanel(QGroupBox):
         self.offset_plus_50_btn.clicked.connect(lambda: self._adjust_offset(50))
         self.reset_offset_btn.clicked.connect(lambda: self.offset_spin.setValue(self._default_offset))
         self.refresh_btn.clicked.connect(self.refresh_requested.emit)
+        self.ble_scan_btn.clicked.connect(self.ble_scan_requested.emit)
+        self.ble_device_combo.currentIndexChanged.connect(self._on_ble_device_index_changed)
         self.auth_lic_edit.textChanged.connect(self.auth_lic_changed.emit)
+        self.udp_ip_edit.textChanged.connect(self.udp_host_changed.emit)
+        self.udp_ip_edit.editingFinished.connect(self._normalize_udp_ip_field)
+        self.udp_stream_repeats_spin.valueChanged.connect(self.udp_stream_repeats_changed.emit)
+        self._on_transport_changed("Serial")
         self.apply_translations()
 
     def set_default_offset(self, value: int):
@@ -133,11 +206,134 @@ class SerialDevicePanel(QGroupBox):
 
     def _on_connect_clicked(self):
         if self.connect_btn.text() == tr("device_output.connect"):
-            port = self.port_combo.currentData()
-            baud = int(self.baud_combo.currentText())
-            self.connect_requested.emit(port, baud)
+            if self.transport_combo.currentText() == "UDP":
+                target = self._normalize_udp_ip_field()
+                if target is None:
+                    self.status_label.setText(tr("device_output.invalid_udp_ip"))
+                    return
+                self.connect_requested.emit(target, -1)  # negative baud = UDP mode
+            elif self.transport_combo.currentText() == "BLE":
+                target = self.ble_device_combo.currentData()
+                if not target:
+                    self.status_label.setText(tr("device_output.no_ble_device"))
+                    return
+                self.connect_requested.emit(target, -2)  # -2 = BLE mode
+            else:
+                port = self.port_combo.currentData()
+                baud = int(self.baud_combo.currentText())
+                self.connect_requested.emit(port, baud)
         else:
             self.disconnect_requested.emit()
+
+    def _on_transport_changed(self, mode):
+        is_serial = (mode == "Serial")
+        is_udp = (mode == "UDP")
+        is_ble = (mode == "BLE")
+        self.port_combo.setVisible(is_serial)
+        self.port_label.setVisible(is_serial)
+        self.refresh_btn.setVisible(is_serial)
+        self.baud_combo.setVisible(is_serial)
+        self.baud_label.setVisible(is_serial)
+        self.udp_ip_edit.setVisible(is_udp)
+        self.udp_ip_label.setVisible(is_udp)
+        self.udp_port_edit.setVisible(is_udp)
+        self.udp_port_label.setVisible(is_udp)
+        self.udp_stream_repeats_label.setVisible(is_udp)
+        self.udp_stream_repeats_spin.setVisible(is_udp)
+        self.ble_device_combo.setVisible(is_ble)
+        self.ble_device_label.setVisible(is_ble)
+        self.ble_scan_btn.setVisible(is_ble)
+
+    def _normalize_udp_ip_field(self):
+        raw_host = self.udp_ip_edit.text().strip()
+        try:
+            host = normalize_udp_host(raw_host)
+        except ValueError:
+            return None
+        if host != raw_host:
+            self.udp_ip_edit.setText(host)
+        return host
+
+    def set_udp_host(self, value):
+        self.udp_ip_edit.setText(str(value or "").strip())
+
+    def get_udp_host(self):
+        return self.udp_ip_edit.text().strip()
+
+    def set_udp_stream_repeats(self, value):
+        self.udp_stream_repeats_spin.setValue(int(value))
+
+    def get_udp_stream_repeats(self):
+        return self.udp_stream_repeats_spin.value()
+
+    def set_ble_device(self, address):
+        address = str(address or "").strip()
+        if not address:
+            return
+        index = self.ble_device_combo.findData(address)
+        if index < 0:
+            self.ble_device_combo.addItem(address, address)
+            index = self.ble_device_combo.findData(address)
+        self.ble_device_combo.setCurrentIndex(index)
+
+    def get_ble_device(self):
+        return self.ble_device_combo.currentData() or ""
+
+    def update_ble_devices(self, devices, raw_count=None):
+        """Update the list of discovered BLE devices."""
+        self.begin_ble_scan()
+        for device in devices:
+            self.add_ble_device(device)
+        self.finish_ble_scan(raw_count=raw_count)
+
+    def begin_ble_scan(self):
+        """Prepare the BLE list for a fresh scan."""
+        self.ble_device_combo.blockSignals(True)
+        self.ble_device_combo.clear()
+        self.ble_device_combo.blockSignals(False)
+        self.ble_scan_btn.setEnabled(False)
+        self.status_label.setText(tr("device_output.ble_scanning"))
+
+    def add_ble_device(self, device):
+        """Add one discovered BLE device to the list."""
+        address = device.get("address", "")
+        if not address or self.ble_device_combo.findData(address) >= 0:
+            return
+
+        name = device.get("name") or "LumaFlow BLE"
+        rssi = device.get("rssi")
+        display_text = f"{name} - {address}"
+        if rssi is not None:
+            display_text = f"{display_text} ({rssi} dBm)"
+
+        was_empty = self.ble_device_combo.count() == 0
+        self.ble_device_combo.addItem(display_text, address)
+        if was_empty:
+            self.ble_device_combo.setCurrentIndex(0)
+            self._on_ble_device_index_changed(0)
+
+        self.status_label.setText(
+            tr("device_output.ble_scan_done", count=self.ble_device_combo.count())
+        )
+
+    def finish_ble_scan(self, raw_count=None, error=None):
+        """Finish a BLE scan and surface the final state."""
+        self.ble_scan_btn.setEnabled(True)
+        if error:
+            self.status_label.setText(tr("device_output.ble_scan_failed", error=error))
+        elif self.ble_device_combo.count() > 0:
+            self.status_label.setText(
+                tr("device_output.ble_scan_done", count=self.ble_device_combo.count())
+            )
+        elif raw_count:
+            self.status_label.setText(tr("device_output.no_lumaflow_ble_device", count=raw_count))
+        else:
+            self.status_label.setText(tr("device_output.no_ble_device"))
+
+    def _on_ble_device_index_changed(self, _index):
+        address = self.ble_device_combo.currentData()
+        if address:
+            self.ble_device_changed.emit(address)
 
     def update_ports(self, ports):
         """Update the list of available ports."""
@@ -154,10 +350,13 @@ class SerialDevicePanel(QGroupBox):
             if index >= 0:
                 self.port_combo.setCurrentIndex(index)
 
-    def set_connected(self, connected):
+    def set_connected(self, connected, message=None):
         """Update UI to reflect connection state."""
         self.connect_btn.setText(tr("device_output.disconnect") if connected else tr("device_output.connect"))
-        self.status_label.setText(tr("device_output.connected") if connected else tr("device_output.disconnected"))
+        if message and (connected or message != "Disconnected"):
+            self.status_label.setText(message)
+        else:
+            self.status_label.setText(tr("device_output.connected") if connected else tr("device_output.disconnected"))
 
     def update_frames_sent(self, count):
         """Update the frames sent counter."""
@@ -204,6 +403,12 @@ class SerialDevicePanel(QGroupBox):
         self.port_label.setText(tr("device_output.port"))
         self.refresh_btn.setText(tr("device_output.refresh"))
         self.baud_label.setText(tr("device_output.baud"))
+        self.transport_label.setText(tr("device_output.transport"))
+        self.udp_ip_label.setText(tr("device_output.udp_ip"))
+        self.udp_port_label.setText(tr("device_output.udp_port"))
+        self.udp_stream_repeats_label.setText(tr("device_output.udp_stream_repeats"))
+        self.ble_device_label.setText(tr("device_output.ble_device"))
+        self.ble_scan_btn.setText(tr("device_output.ble_scan"))
         self.offset_label.setText(tr("device_output.offset"))
         self.reset_offset_btn.setText(tr("device_output.reset"))
         self.auth_lic_label.setText(tr("device_output.auth_lic"))

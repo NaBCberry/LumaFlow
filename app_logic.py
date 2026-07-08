@@ -439,10 +439,28 @@ class AppLogic(QObject):
         """Get list of available serial ports."""
         return self.serial_device.get_ports()
 
+    def get_ble_devices(self):
+        """Get list of discoverable LumaFlow BLE transmitters."""
+        return self.serial_device.scan_ble_devices()
+
+    def get_last_ble_scan_count(self):
+        """Get the raw number of BLE advertisements from the last scan."""
+        return self.serial_device.last_ble_scan_count
+
+    def get_udp_stream_repeats(self):
+        """Get UDP STREAM repeat count."""
+        return self.serial_device.get_udp_stream_repeats()
+
     @Slot(str, int)
     def connect_serial(self, port, baud_rate):
-        """Connect to serial device and immediately send AUTH."""
-        if not self.serial_device.connect(port, baud_rate):
+        """Connect to serial, UDP, or BLE output and immediately send AUTH."""
+        if baud_rate == -1:
+            result = self.serial_device.connect(port, transport='udp')
+        elif baud_rate == -2:
+            result = self.serial_device.connect(port, transport='ble')
+        else:
+            result = self.serial_device.connect(port, baud_rate, transport='serial')
+        if not result:
             self.serial_auth_status_changed.emit("Not Sent")
             return
 
@@ -466,7 +484,12 @@ class AppLogic(QObject):
             return
 
         self.serial_auth_status_changed.emit("Sent")
-        self.serial_device.mark_connected(f"Connected to {port} @ {baud_rate}bps")
+        if baud_rate == -1:
+            self.serial_device.mark_connected(f"Connected to {self.serial_device.get_udp_endpoint_label()} via UDP")
+        elif baud_rate == -2:
+            self.serial_device.mark_connected(f"Connected to {self.serial_device.get_ble_endpoint_label()} via BLE")
+        else:
+            self.serial_device.mark_connected(f"Connected to {port} @ {baud_rate}bps")
 
     @Slot()
     def disconnect_serial(self):
@@ -478,6 +501,11 @@ class AppLogic(QObject):
     def set_serial_offset(self, offset_ms):
         """Set serial device timing offset."""
         self.serial_device.set_offset(offset_ms)
+
+    @Slot(int)
+    def set_udp_stream_repeats(self, repeats):
+        """Set UDP STREAM repeat count."""
+        self.serial_device.set_udp_stream_repeats(repeats)
 
     @Slot(str)
     def set_serial_auth_lic(self, lic_text):
@@ -539,5 +567,8 @@ class AppLogic(QObject):
                 if not self.device_thread.wait(3000):
                     self.device_thread.terminate()
                     self.device_thread.wait()
+
+            if hasattr(self, 'serial_device'):
+                self.serial_device.disconnect(emit_signal=False)
         except RuntimeError:
             pass  # Qt objects already deleted

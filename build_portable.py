@@ -7,6 +7,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import platform
 import zipfile
 from pathlib import Path
 
@@ -18,8 +19,39 @@ BUILD_DIR = BASE_DIR / "build"
 DIST_DIR = BASE_DIR / "dist"
 SPEC_PATH = BASE_DIR / "LumaFlow.spec"
 README_PATH = DIST_DIR / "README.txt"
-EXE_PATH = DIST_DIR / "LumaFlow.exe"
-ZIP_PATH = BASE_DIR / f'LumaFlow_Portable_v{APP_METADATA["version"]}.zip'
+PYINSTALLER_EXE_PATH = DIST_DIR / "LumaFlow.exe"
+
+
+def get_platform_tag():
+    """Return a short platform tag suitable for release filenames."""
+    system = platform.system() or sys.platform
+    machine = platform.machine().lower()
+
+    system_tag = {
+        "Windows": "Windows",
+        "Darwin": "macOS",
+        "Linux": "Linux",
+    }.get(system, system.replace(" ", ""))
+
+    arch_tag = {
+        "amd64": "x64",
+        "x86_64": "x64",
+        "arm64": "arm64",
+        "aarch64": "arm64",
+        "i386": "x86",
+        "i686": "x86",
+        "x86": "x86",
+    }.get(machine, machine.replace(" ", "") or "unknown")
+
+    return f"{system_tag}_{arch_tag}"
+
+
+APP_VERSION = APP_METADATA["version"]
+PLATFORM_TAG = get_platform_tag()
+RELEASE_BASENAME = f"LumaFlow_v{APP_VERSION}_{PLATFORM_TAG}"
+EXE_NAME = f"{RELEASE_BASENAME}.exe"
+EXE_PATH = DIST_DIR / EXE_NAME
+ZIP_PATH = BASE_DIR / f"{RELEASE_BASENAME}_Portable.zip"
 
 
 def clean_build():
@@ -41,6 +73,17 @@ def build_exe():
         str(SPEC_PATH),
     ]
     subprocess.run(cmd, check=True, cwd=BASE_DIR)
+    rename_exe()
+
+
+def rename_exe():
+    """Rename the PyInstaller output to the release filename."""
+    if not PYINSTALLER_EXE_PATH.exists():
+        raise FileNotFoundError(f"Expected build output not found: {PYINSTALLER_EXE_PATH}")
+
+    if EXE_PATH.exists():
+        EXE_PATH.unlink()
+    PYINSTALLER_EXE_PATH.rename(EXE_PATH)
 
 
 def create_readme():
@@ -49,7 +92,7 @@ def create_readme():
 
 Usage:
 1. Extract this archive to any folder.
-2. Double-click LumaFlow.exe to run.
+2. Double-click {EXE_NAME} to run.
 
 System requirements:
 - Windows 10/11 64-bit
@@ -61,6 +104,7 @@ Notes:
 - Some antivirus tools may raise false positives for one-file bundles.
 
 Version: {APP_METADATA['version']}
+Platform: {PLATFORM_TAG}
 Author: {APP_METADATA['author']}
 """
     DIST_DIR.mkdir(parents=True, exist_ok=True)
@@ -73,7 +117,7 @@ def create_zip():
 
     with zipfile.ZipFile(ZIP_PATH, "w", zipfile.ZIP_DEFLATED) as zipf:
         if EXE_PATH.exists():
-            zipf.write(EXE_PATH, "LumaFlow.exe")
+            zipf.write(EXE_PATH, EXE_NAME)
         if README_PATH.exists():
             zipf.write(README_PATH, "README.txt")
 
@@ -83,6 +127,11 @@ def create_zip():
 
 def main():
     print("LumaFlow portable build tool")
+    print("=" * 50)
+    print(f"Version: {APP_VERSION}")
+    print(f"Platform: {PLATFORM_TAG}")
+    print(f"Executable: {EXE_NAME}")
+    print(f"Archive: {ZIP_PATH.name}")
     print("=" * 50)
 
     try:
@@ -103,7 +152,8 @@ def main():
     create_zip()
 
     print("\nBuild complete.")
-    print(f"Output file: {ZIP_PATH.name}")
+    print(f"Executable: {EXE_PATH.relative_to(BASE_DIR)}")
+    print(f"Archive: {ZIP_PATH.name}")
     return 0
 
 

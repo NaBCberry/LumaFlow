@@ -1,7 +1,7 @@
 import sys
 import os
 import pandas as pd
-from PySide6.QtCore import Signal, Slot, Qt, QTimer, QSettings
+from PySide6.QtCore import QObject, Signal, Slot, Qt, QTimer, QSettings, QThread
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QIcon
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
@@ -19,6 +19,13 @@ from .video_player_widget import VideoPlayerWidget
 from .device_output_dock import DeviceOutputWidget
 from core.i18n import get_language, set_language, tr
 from core.resource_paths import icon_path, resource_path
+from core.serial_device_manager import (
+    BLE_SCAN_TIMEOUT_SEC,
+    UDP_STREAM_REPEATS,
+    UDP_STREAM_REPEATS_MAX,
+    UDP_STREAM_REPEATS_MIN,
+    scan_lumaflow_ble_devices,
+)
 from core.timecode import format_time_ms, parse_timecode
 
 
@@ -30,6 +37,27 @@ AUTO_ROLL_MODE_FOLLOW_PLAYHEAD = "follow_playhead"
 AUTO_ROLL_FOLLOW_ANCHOR_RATIO = 0.15
 AUTO_ROLL_FOLLOW_MIN_SHIFT_MS = 16.0
 AUTO_ROLL_FOLLOW_MIN_SHIFT_PX = 1.0
+
+
+class BLEScanWorker(QObject):
+    """Runs BLE scanning off the Qt UI thread."""
+    device_found = Signal(object)
+    finished = Signal(object, int, str)
+
+    def __init__(self, timeout=BLE_SCAN_TIMEOUT_SEC):
+        super().__init__()
+        self.timeout = timeout
+
+    @Slot()
+    def run(self):
+        try:
+            result = scan_lumaflow_ble_devices(
+                self.timeout,
+                device_callback=self.device_found.emit,
+            )
+            self.finished.emit(result["devices"], int(result["raw_count"]), "")
+        except Exception as exc:
+            self.finished.emit([], 0, str(exc))
 
 class MainWindow(QMainWindow):
     # Signals to be connected to the AppLogic controller
@@ -69,6 +97,8 @@ class MainWindow(QMainWindow):
         self.syncing_edit_video_to_timeline = False
         self.syncing_timeline_to_source_video = False
         self.syncing_timeline_to_edit_video = False
+        self.ble_scan_thread = None
+        self.ble_scan_worker = None
 
         self.create_actions()
         self.init_ui() # init_ui now depends on actions for context menus
@@ -493,7 +523,7 @@ class MainWindow(QMainWindow):
 
         # Device output signals
         self.logic.serial_connection_changed.connect(
-            lambda connected, msg: self.device_output_widget.serial_panel.set_connected(connected)
+            self.device_output_widget.serial_panel.set_connected
         )
         self.logic.serial_frame_sent.connect(
             self.device_output_widget.serial_panel.update_frames_sent
@@ -1256,10 +1286,14 @@ class MainWindow(QMainWindow):
 
         # Serial panel signals
         serial_panel.refresh_requested.connect(self._refresh_serial_ports)
+        serial_panel.ble_scan_requested.connect(self._refresh_ble_devices)
         serial_panel.connect_requested.connect(self.logic.connect_serial)
         serial_panel.disconnect_requested.connect(self.logic.disconnect_serial)
         serial_panel.offset_changed.connect(self._on_serial_offset_changed)
         serial_panel.auth_lic_changed.connect(self._on_serial_auth_lic_changed)
+        serial_panel.udp_host_changed.connect(self._on_udp_host_changed)
+        serial_panel.udp_stream_repeats_changed.connect(self._on_udp_stream_repeats_changed)
+        serial_panel.ble_device_changed.connect(self._on_ble_device_changed)
         self._restore_device_output_offsets()
 
         # Initial port list
@@ -1272,6 +1306,13 @@ class MainWindow(QMainWindow):
             offset = fallback
         return max(-1000, min(1000, offset))
 
+    def _coerce_udp_stream_repeats(self, value, fallback):
+        try:
+            repeats = int(value)
+        except (TypeError, ValueError):
+            repeats = fallback
+        return max(UDP_STREAM_REPEATS_MIN, min(UDP_STREAM_REPEATS_MAX, repeats))
+
     def _restore_device_output_offsets(self):
         """Restore device output settings from QSettings and sync UI + logic."""
         settings = QSettings("LumaFlow", "LumaFlow")
@@ -1279,6 +1320,12 @@ class MainWindow(QMainWindow):
         serial_fallback = 200
         serial_offset = self._coerce_offset(settings.value("device_output/serial_offset_ms"), serial_fallback)
         serial_auth_lic = settings.value("device_output/serial_auth_lic", "", str)
+        udp_host = settings.value("device_output/udp_host", "", str)
+        udp_stream_repeats = self._coerce_udp_stream_repeats(
+            settings.value("device_output/udp_stream_repeats"),
+            UDP_STREAM_REPEATS,
+        )
+        ble_device = settings.value("device_output/ble_device", "", str)
 
         serial_panel = self.device_output_widget.serial_panel
 
@@ -1288,23 +1335,56 @@ class MainWindow(QMainWindow):
         serial_panel.auth_lic_edit.blockSignals(True)
         serial_panel.set_auth_lic(serial_auth_lic)
         serial_panel.auth_lic_edit.blockSignals(False)
+        serial_panel.udp_ip_edit.blockSignals(True)
+        serial_panel.set_udp_host(udp_host)
+        serial_panel.udp_ip_edit.blockSignals(False)
+        serial_panel.udp_stream_repeats_spin.blockSignals(True)
+        serial_panel.set_udp_stream_repeats(udp_stream_repeats)
+        serial_panel.udp_stream_repeats_spin.blockSignals(False)
+        serial_panel.ble_device_combo.blockSignals(True)
+        serial_panel.set_ble_device(ble_device)
+        serial_panel.ble_device_combo.blockSignals(False)
 
         serial_panel.set_default_offset(serial_offset)
 
         self.logic.set_serial_offset(serial_offset)
+        self.logic.set_udp_stream_repeats(udp_stream_repeats)
         self.logic.set_serial_auth_lic(serial_auth_lic)
-        self._persist_device_output_settings(serial_offset=serial_offset, serial_auth_lic=serial_auth_lic)
+        self._persist_device_output_settings(
+            serial_offset=serial_offset,
+            serial_auth_lic=serial_auth_lic,
+            udp_host=udp_host,
+            udp_stream_repeats=udp_stream_repeats,
+            ble_device=ble_device,
+        )
         serial_panel.set_auth_status("Not Sent")
         serial_panel.set_lic_info(self.logic.get_serial_auth_lic_info())
 
-    def _persist_device_output_settings(self, serial_offset=None, serial_auth_lic=None):
+    def _persist_device_output_settings(
+        self,
+        serial_offset=None,
+        serial_auth_lic=None,
+        udp_host=None,
+        udp_stream_repeats=None,
+        ble_device=None,
+    ):
         settings = QSettings("LumaFlow", "LumaFlow")
+        serial_panel = self.device_output_widget.serial_panel
         if serial_offset is None:
             serial_offset = self.logic.serial_device.get_offset()
         if serial_auth_lic is None:
             serial_auth_lic = self.logic.serial_auth_lic
+        if udp_host is None:
+            udp_host = serial_panel.get_udp_host()
+        if udp_stream_repeats is None:
+            udp_stream_repeats = serial_panel.get_udp_stream_repeats()
+        if ble_device is None:
+            ble_device = serial_panel.get_ble_device()
         settings.setValue("device_output/serial_offset_ms", int(serial_offset))
         settings.setValue("device_output/serial_auth_lic", serial_auth_lic)
+        settings.setValue("device_output/udp_host", udp_host)
+        settings.setValue("device_output/udp_stream_repeats", int(udp_stream_repeats))
+        settings.setValue("device_output/ble_device", ble_device)
 
     @Slot(int)
     def _on_serial_offset_changed(self, offset_ms):
@@ -1315,6 +1395,19 @@ class MainWindow(QMainWindow):
     def _on_serial_auth_lic_changed(self, lic_text):
         self.logic.set_serial_auth_lic(lic_text)
         self._persist_device_output_settings(serial_auth_lic=lic_text)
+
+    @Slot(str)
+    def _on_udp_host_changed(self, udp_host):
+        self._persist_device_output_settings(udp_host=udp_host)
+
+    @Slot(int)
+    def _on_udp_stream_repeats_changed(self, repeats):
+        self.logic.set_udp_stream_repeats(repeats)
+        self._persist_device_output_settings(udp_stream_repeats=repeats)
+
+    @Slot(str)
+    def _on_ble_device_changed(self, ble_device):
+        self._persist_device_output_settings(ble_device=ble_device)
 
     def on_about(self):
         from .dialogs import AboutDialog
@@ -1335,6 +1428,46 @@ class MainWindow(QMainWindow):
         """Refresh the list of available serial ports."""
         ports = self.logic.get_serial_ports()
         self.device_output_widget.serial_panel.update_ports(ports)
+
+    def _refresh_ble_devices(self):
+        """Refresh the list of discoverable BLE transmitters."""
+        serial_panel = self.device_output_widget.serial_panel
+        if self.ble_scan_thread and self.ble_scan_thread.isRunning():
+            return
+
+        serial_panel.begin_ble_scan()
+
+        self.ble_scan_thread = QThread(self)
+        self.ble_scan_worker = BLEScanWorker()
+        self.ble_scan_worker.moveToThread(self.ble_scan_thread)
+
+        self.ble_scan_thread.started.connect(self.ble_scan_worker.run)
+        self.ble_scan_worker.device_found.connect(self._on_ble_device_found)
+        self.ble_scan_worker.finished.connect(self._on_ble_scan_finished)
+        self.ble_scan_worker.finished.connect(self.ble_scan_thread.quit)
+        self.ble_scan_worker.finished.connect(self.ble_scan_worker.deleteLater)
+        self.ble_scan_thread.finished.connect(self.ble_scan_thread.deleteLater)
+        self.ble_scan_thread.finished.connect(self._clear_ble_scan_worker)
+        self.ble_scan_thread.start()
+
+    @Slot(object)
+    def _on_ble_device_found(self, device):
+        serial_panel = self.device_output_widget.serial_panel
+        serial_panel.add_ble_device(device)
+        self._persist_device_output_settings(ble_device=serial_panel.get_ble_device())
+
+    @Slot(object, int, str)
+    def _on_ble_scan_finished(self, devices, raw_count, error):
+        serial_panel = self.device_output_widget.serial_panel
+        for device in devices:
+            serial_panel.add_ble_device(device)
+        serial_panel.finish_ble_scan(raw_count=raw_count, error=error or None)
+        self._persist_device_output_settings(ble_device=serial_panel.get_ble_device())
+
+    @Slot()
+    def _clear_ble_scan_worker(self):
+        self.ble_scan_thread = None
+        self.ble_scan_worker = None
 
     # --- 键盘事件处理 ---
     def keyPressEvent(self, event):

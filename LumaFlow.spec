@@ -1,0 +1,83 @@
+# -*- mode: python ; coding: utf-8 -*-
+
+from pathlib import Path
+
+
+BASE_DIR = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
+ICON_PATH = BASE_DIR / "resources" / "icons" / "icon.png"
+RESOURCES_DIR = BASE_DIR / "resources"
+
+
+a = Analysis(
+    [str(BASE_DIR / "main.py")],
+    pathex=[str(BASE_DIR)],
+    binaries=[],
+    datas=[(str(RESOURCES_DIR), "resources")],
+    hiddenimports=[
+        "PySide6.QtCore",
+        "PySide6.QtGui",
+        "PySide6.QtWidgets",
+        "pyqtgraph",
+        "numpy",
+        "pandas",
+        "numba",
+        "scipy",
+        "scipy.fft",
+        "scipy.signal",
+        "scipy.ndimage",
+        "scipy.interpolate",
+        "scipy._lib",
+        "scipy.special",
+        "scipy._cyutility",
+        "librosa",
+        "soundfile",
+        "matplotlib",
+        "matplotlib.pyplot",
+        "matplotlib.cm",
+        "matplotlib.colors",
+        "serial",
+        "bleak",
+        "bleak.backends.winrt.client",
+        "bleak.backends.winrt.scanner",
+        "winrt.windows.devices.bluetooth",
+        "winrt.windows.devices.bluetooth.advertisement",
+        "winrt.windows.devices.bluetooth.genericattributeprofile",
+        "winrt.windows.devices.enumeration",
+        "winrt.windows.devices.radios",
+        "winrt.windows.foundation",
+        "winrt.windows.foundation.collections",
+        "winrt.windows.storage.streams",
+        "vlc",
+        "requests",
+        "PIL",
+    ],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=["matplotlib.tests", "numpy.tests", "pandas.tests", "tkinter", "IPython", "jupyter"],
+    noarchive=False,
+    optimize=0,
+)
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.datas,
+    [],
+    name="LumaFlow",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=[str(ICON_PATH)] if ICON_PATH.exists() else [],
+)
