@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
-    QPushButton, QComboBox, QLabel, QSpinBox, QLineEdit
+    QPushButton, QComboBox, QLabel, QSpinBox, QLineEdit, QCheckBox, QSlider
 )
 from PySide6.QtCore import Signal, Qt
 from core.serial_device_manager import (
@@ -11,6 +11,11 @@ from core.serial_device_manager import (
     normalize_udp_host,
 )
 from core.i18n import tr
+from core.serial_protocol import (
+    GLOBAL_BRIGHTNESS_DEFAULT,
+    GLOBAL_BRIGHTNESS_MAX,
+    GLOBAL_BRIGHTNESS_MIN,
+)
 
 
 class SerialDevicePanel(QGroupBox):
@@ -24,6 +29,7 @@ class SerialDevicePanel(QGroupBox):
     udp_stream_repeats_changed = Signal(int)
     ble_scan_requested = Signal()
     ble_device_changed = Signal(str)
+    global_brightness_changed = Signal(bool, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -116,6 +122,7 @@ class SerialDevicePanel(QGroupBox):
         self.connect_btn = QPushButton()
         connect_row.addWidget(self.connect_btn)
         self.status_label = QLabel()
+        self.status_label.setWordWrap(True)
         connect_row.addWidget(self.status_label)
         connect_row.addStretch()
         layout.addLayout(connect_row)
@@ -141,6 +148,23 @@ class SerialDevicePanel(QGroupBox):
         offset_row.addWidget(self.reset_offset_btn)
         offset_row.addStretch()
         layout.addLayout(offset_row)
+
+        # Non-destructive brightness modulation applied only to outgoing STREAM frames.
+        brightness_row = QHBoxLayout()
+        self.global_brightness_checkbox = QCheckBox()
+        brightness_row.addWidget(self.global_brightness_checkbox)
+        self.global_brightness_slider = QSlider(Qt.Horizontal)
+        self.global_brightness_slider.setRange(GLOBAL_BRIGHTNESS_MIN, GLOBAL_BRIGHTNESS_MAX)
+        self.global_brightness_slider.setValue(GLOBAL_BRIGHTNESS_DEFAULT)
+        self.global_brightness_slider.setMinimumWidth(120)
+        brightness_row.addWidget(self.global_brightness_slider, 1)
+        self.global_brightness_spin = QSpinBox()
+        self.global_brightness_spin.setRange(GLOBAL_BRIGHTNESS_MIN, GLOBAL_BRIGHTNESS_MAX)
+        self.global_brightness_spin.setValue(GLOBAL_BRIGHTNESS_DEFAULT)
+        self.global_brightness_spin.setSuffix("%")
+        self.global_brightness_spin.setFixedWidth(72)
+        brightness_row.addWidget(self.global_brightness_spin)
+        layout.addLayout(brightness_row)
 
         auth_row = QHBoxLayout()
         self.auth_lic_label = QLabel()
@@ -195,6 +219,11 @@ class SerialDevicePanel(QGroupBox):
         self.udp_ip_edit.textChanged.connect(self.udp_host_changed.emit)
         self.udp_ip_edit.editingFinished.connect(self._normalize_udp_ip_field)
         self.udp_stream_repeats_spin.valueChanged.connect(self.udp_stream_repeats_changed.emit)
+        self.global_brightness_checkbox.toggled.connect(self._on_global_brightness_changed)
+        self.global_brightness_slider.valueChanged.connect(self.global_brightness_spin.setValue)
+        self.global_brightness_spin.valueChanged.connect(self.global_brightness_slider.setValue)
+        self.global_brightness_spin.valueChanged.connect(self._on_global_brightness_changed)
+        self._update_global_brightness_controls(False)
         self._on_transport_changed("Serial")
         self.apply_translations()
 
@@ -265,6 +294,25 @@ class SerialDevicePanel(QGroupBox):
 
     def get_udp_stream_repeats(self):
         return self.udp_stream_repeats_spin.value()
+
+    def _on_global_brightness_changed(self, _value=None):
+        enabled = self.global_brightness_checkbox.isChecked()
+        self._update_global_brightness_controls(enabled)
+        self.global_brightness_changed.emit(enabled, self.global_brightness_spin.value())
+
+    def _update_global_brightness_controls(self, enabled):
+        self.global_brightness_slider.setEnabled(bool(enabled))
+        self.global_brightness_spin.setEnabled(bool(enabled))
+
+    def set_global_brightness(self, enabled, percent):
+        self.global_brightness_checkbox.setChecked(bool(enabled))
+        value = int(percent)
+        self.global_brightness_slider.setValue(value)
+        self.global_brightness_spin.setValue(value)
+        self._update_global_brightness_controls(enabled)
+
+    def get_global_brightness(self):
+        return self.global_brightness_checkbox.isChecked(), self.global_brightness_spin.value()
 
     def set_ble_device(self, address):
         address = str(address or "").strip()
@@ -352,11 +400,18 @@ class SerialDevicePanel(QGroupBox):
 
     def set_connected(self, connected, message=None):
         """Update UI to reflect connection state."""
+        self.set_connection_busy(False)
         self.connect_btn.setText(tr("device_output.disconnect") if connected else tr("device_output.connect"))
         if message and (connected or message != "Disconnected"):
             self.status_label.setText(message)
         else:
             self.status_label.setText(tr("device_output.connected") if connected else tr("device_output.disconnected"))
+
+    def set_connection_busy(self, busy):
+        self.connect_btn.setEnabled(not busy)
+        self.transport_combo.setEnabled(not busy)
+        if busy:
+            self.status_label.setText(tr("device_output.connecting"))
 
     def update_frames_sent(self, count):
         """Update the frames sent counter."""
@@ -410,6 +465,7 @@ class SerialDevicePanel(QGroupBox):
         self.ble_device_label.setText(tr("device_output.ble_device"))
         self.ble_scan_btn.setText(tr("device_output.ble_scan"))
         self.offset_label.setText(tr("device_output.offset"))
+        self.global_brightness_checkbox.setText(tr("device_output.global_brightness"))
         self.reset_offset_btn.setText(tr("device_output.reset"))
         self.auth_lic_label.setText(tr("device_output.auth_lic"))
         self.auth_status_title_label.setText(tr("device_output.auth_status"))

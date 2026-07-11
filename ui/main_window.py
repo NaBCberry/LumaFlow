@@ -17,6 +17,7 @@ from .audio_controls_widget import AudioControlsWidget
 from .audio_settings_dialog import AudioSettingsDialog
 from .video_player_widget import VideoPlayerWidget
 from .device_output_dock import DeviceOutputWidget
+from .function_visuals import make_function_icon
 from core.i18n import get_language, set_language, tr
 from core.resource_paths import icon_path, resource_path
 from core.serial_device_manager import (
@@ -26,7 +27,13 @@ from core.serial_device_manager import (
     UDP_STREAM_REPEATS_MIN,
     scan_lumaflow_ble_devices,
 )
+from core.serial_protocol import (
+    GLOBAL_BRIGHTNESS_DEFAULT,
+    GLOBAL_BRIGHTNESS_MAX,
+    GLOBAL_BRIGHTNESS_MIN,
+)
 from core.timecode import format_time_ms, parse_timecode
+from ui.timeline_theme import get_visual_theme_profile
 
 
 DEFAULT_NEW_EDIT_DURATION_SEC = 9600.0
@@ -37,6 +44,12 @@ AUTO_ROLL_MODE_FOLLOW_PLAYHEAD = "follow_playhead"
 AUTO_ROLL_FOLLOW_ANCHOR_RATIO = 0.15
 AUTO_ROLL_FOLLOW_MIN_SHIFT_MS = 16.0
 AUTO_ROLL_FOLLOW_MIN_SHIFT_PX = 1.0
+LAST_WORKSPACE_SETTING_KEYS = {
+    "edit_file": "workspace/last/edit_file",
+    "source_file": "workspace/last/source_file",
+    "edit_video": "workspace/last/edit_video",
+    "source_video": "workspace/last/source_video",
+}
 
 
 class BLEScanWorker(QObject):
@@ -89,8 +102,9 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(str(app_icon_path)))
         self.setGeometry(100, 100, 1600, 900) # [FIXED] Corrected window height
 
-        self.should_auto_zoom = True
-        self.is_initial_load = True
+        self.should_auto_zoom = False
+        self._fit_edit_on_next_data_change = False
+        self._fit_source_on_next_data_change = False
 
         # Flags to prevent feedback loops during video synchronization
         self.syncing_source_video_to_timeline = False
@@ -166,6 +180,13 @@ class MainWindow(QMainWindow):
         self.edit_preview_dock.setWidget(self.edit_preview_widget)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.edit_preview_dock)
 
+        self.source_preview_dock.visibilityChanged.connect(
+            self.source_preview_widget.set_output_visible
+        )
+        self.edit_preview_dock.visibilityChanged.connect(
+            self.edit_preview_widget.set_output_visible
+        )
+
         # Stack video docks vertically
         self.splitDockWidget(self.source_preview_dock, self.edit_preview_dock, Qt.Vertical)
 
@@ -191,6 +212,8 @@ class MainWindow(QMainWindow):
         # Playback mutual exclusion
         self.source_preview_widget.playback_started.connect(self._on_source_playback_started)
         self.edit_preview_widget.playback_started.connect(self._on_edit_playback_started)
+        self.source_preview_widget.media_loaded.connect(self._on_source_video_loaded)
+        self.edit_preview_widget.media_loaded.connect(self._on_edit_video_loaded)
 
         # --- Status Bar ---
         self.status_bar = self.statusBar()
@@ -263,6 +286,12 @@ class MainWindow(QMainWindow):
         self.open_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon), tr("action.open_edit"), self)
         self.open_action.setShortcut(QKeySequence.Open)
         self.open_source_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_DirLinkIcon), tr("action.open_source"), self)
+        self.open_last_workspace_action = QAction(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton),
+            tr("action.open_last_workspace"),
+            self,
+        )
+        self.open_last_workspace_action.setEnabled(self._has_last_workspace())
         self.save_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton), tr("action.save"), self)
         self.save_action.setShortcut(QKeySequence.Save)
         self.save_as_action = QAction(tr("action.save_as"), self)
@@ -297,6 +326,42 @@ class MainWindow(QMainWindow):
         self.insert_color_action.setShortcut("I")
         self.edit_frame_action = QAction(tr("action.edit_frame"), self)
         self.edit_frame_action.setShortcut("E")
+        self.adjust_region_brightness_action = QAction(
+            tr("action.adjust_region_brightness"),
+            self,
+        )
+        self.adjust_region_brightness_action.setEnabled(False)
+        self.set_region_color_action = QAction(
+            tr("action.set_region_color"),
+            self,
+        )
+        self.set_region_color_action.setEnabled(False)
+        self.increase_region_brightness_action = QAction(
+            tr("action.increase_region_brightness"),
+            self,
+        )
+        self.increase_region_brightness_action.setShortcut("Ctrl+Up")
+        self.increase_region_brightness_action.setEnabled(False)
+        self.decrease_region_brightness_action = QAction(
+            tr("action.decrease_region_brightness"),
+            self,
+        )
+        self.decrease_region_brightness_action.setShortcut("Ctrl+Down")
+        self.decrease_region_brightness_action.setEnabled(False)
+        self.function_actions = []
+        function_shortcuts = {
+            0: "Ctrl+1",
+            1: "Ctrl+2",
+            2: "Ctrl+3",
+            3: "Ctrl+4",
+        }
+        for function in range(4):
+            action = QAction(tr(f"function.mode_{function}"), self)
+            action.setData(function)
+            action.setShortcut(function_shortcuts[function])
+            action.setEnabled(False)
+            self.function_actions.append(action)
+        self._update_function_action_icons("dark_theme")
 
         self.generate_breathing_action = QAction(tr("action.generate_breathing"), self)
         self.generate_rainbow_action = QAction(tr("action.generate_rainbow"), self)
@@ -368,6 +433,8 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.new_edit_action)
         file_menu.addAction(self.open_action)
         file_menu.addAction(self.open_source_action)
+        file_menu.addAction(self.open_last_workspace_action)
+        file_menu.addSeparator()
         file_menu.addAction(self.save_action)
         file_menu.addAction(self.save_as_action)
         file_menu.addSeparator()
@@ -411,6 +478,14 @@ class MainWindow(QMainWindow):
         timeline_menu = self.menuBar().addMenu(tr("menu.timeline"))
         timeline_menu.addAction(self.add_marker_action)
         timeline_menu.addAction(self.edit_frame_action)  # Per PRD 5.1
+        self.function_menu = timeline_menu.addMenu(tr("menu.set_function"))
+        self.function_menu.setEnabled(False)
+        for action in self.function_actions:
+            self.function_menu.addAction(action)
+        timeline_menu.addAction(self.set_region_color_action)
+        timeline_menu.addAction(self.adjust_region_brightness_action)
+        timeline_menu.addAction(self.increase_region_brightness_action)
+        timeline_menu.addAction(self.decrease_region_brightness_action)
         insert_menu = timeline_menu.addMenu(tr("menu.insert"))
         insert_menu.addAction(self.insert_blackout_action)
         insert_menu.addAction(self.insert_color_action)
@@ -442,6 +517,7 @@ class MainWindow(QMainWindow):
         self.new_edit_action.triggered.connect(self.on_new_edit)
         self.open_action.triggered.connect(self.on_open_clicked)
         self.open_source_action.triggered.connect(self.on_open_source_clicked)
+        self.open_last_workspace_action.triggered.connect(self.on_open_last_workspace)
         self.save_action.triggered.connect(lambda: self.save_requested.emit(None))
         self.save_as_action.triggered.connect(self.on_save_as_clicked)
         self.exit_action.triggered.connect(self.close)
@@ -463,6 +539,21 @@ class MainWindow(QMainWindow):
         self.insert_blackout_action.triggered.connect(lambda: self.insert_blackout_requested.emit(self.edit_timeline.get_playback_head_time()))
         self.insert_color_action.triggered.connect(self.on_insert_color_frame)
         self.edit_frame_action.triggered.connect(self.on_edit_frame)  # Per PRD 5.1
+        self.adjust_region_brightness_action.triggered.connect(
+            self.on_adjust_region_brightness
+        )
+        self.set_region_color_action.triggered.connect(self.on_set_region_color)
+        self.increase_region_brightness_action.triggered.connect(
+            lambda: self.on_quick_adjust_region_brightness(110)
+        )
+        self.decrease_region_brightness_action.triggered.connect(
+            lambda: self.on_quick_adjust_region_brightness(90)
+        )
+        for action in self.function_actions:
+            function = int(action.data())
+            action.triggered.connect(
+                lambda _checked=False, mode=function: self.on_set_region_function(mode)
+            )
         self.generate_breathing_action.triggered.connect(self.on_generate_breathing)
         self.generate_rainbow_action.triggered.connect(self.on_generate_rainbow)
         self.generate_gradient_action.triggered.connect(self.on_generate_gradient)
@@ -525,6 +616,9 @@ class MainWindow(QMainWindow):
         self.logic.serial_connection_changed.connect(
             self.device_output_widget.serial_panel.set_connected
         )
+        self.logic.serial_connection_busy_changed.connect(
+            self.device_output_widget.serial_panel.set_connection_busy
+        )
         self.logic.serial_frame_sent.connect(
             self.device_output_widget.serial_panel.update_frames_sent
         )
@@ -558,6 +652,15 @@ class MainWindow(QMainWindow):
         self.edit_timeline.cut_requested.connect(self.logic.cut_selection)
         self.edit_timeline.paste_requested.connect(self.logic.paste_selection)
         self.edit_timeline.delete_requested.connect(self.logic.delete_selection)
+        self.edit_timeline.set_function_requested.connect(
+            self.on_set_region_function_requested
+        )
+        self.edit_timeline.adjust_brightness_requested.connect(
+            self.on_adjust_region_brightness_requested
+        )
+        self.edit_timeline.set_color_requested.connect(
+            self.on_set_region_color_requested
+        )
         
         # Connect timeline playback head changes to video player synchronization
         self.source_timeline_group.playback_head_changed.connect(self.sync_source_video_to_timeline)
@@ -573,12 +676,134 @@ class MainWindow(QMainWindow):
     def on_open_clicked(self):
         file_path, _ = QFileDialog.getOpenFileName(self, tr("action.open_edit"), "", tr("main.file_filter_edit"))
         if file_path:
-            self.open_requested.emit(file_path)
+            self._fit_edit_on_next_data_change = True
+            try:
+                self.open_requested.emit(file_path)
+            finally:
+                self._fit_edit_on_next_data_change = False
 
     def on_open_source_clicked(self):
         file_path, _ = QFileDialog.getOpenFileName(self, tr("action.open_source"), "", tr("main.file_filter_edit"))
         if file_path:
-            self.open_source_requested.emit(file_path)
+            self._fit_source_on_next_data_change = True
+            try:
+                self.open_source_requested.emit(file_path)
+            finally:
+                self._fit_source_on_next_data_change = False
+
+    def _get_last_workspace_paths(self):
+        settings = QSettings("LumaFlow", "LumaFlow")
+        return {
+            name: settings.value(key, "", str).strip()
+            for name, key in LAST_WORKSPACE_SETTING_KEYS.items()
+        }
+
+    def _has_last_workspace(self):
+        return any(self._get_last_workspace_paths().values())
+
+    def _save_last_workspace(self):
+        paths = {
+            "edit_file": self.logic.current_file_path,
+            "source_file": self.logic.current_source_file_path,
+            "edit_video": self.logic.current_edit_video_path,
+            "source_video": self.logic.current_source_video_path,
+        }
+        settings = QSettings("LumaFlow", "LumaFlow")
+        for name, key in LAST_WORKSPACE_SETTING_KEYS.items():
+            settings.setValue(key, paths[name] or "")
+        if hasattr(self, "open_last_workspace_action"):
+            self.open_last_workspace_action.setEnabled(any(paths.values()))
+
+    def _load_workspace_video(self, file_path, timeline_type, announce=True):
+        if timeline_type == "source":
+            preview_widget = self.source_preview_widget
+            status_key = "status.source_video_loaded"
+        else:
+            preview_widget = self.edit_preview_widget
+            status_key = "status.edit_video_loaded"
+
+        preview_widget.load_video(file_path)
+        self.logic.load_video_audio(file_path, timeline_type)
+        if announce:
+            self.set_status_message(
+                tr(status_key, name=os.path.basename(file_path))
+            )
+        return True
+
+    @Slot()
+    def on_open_last_workspace(self):
+        paths = self._get_last_workspace_paths()
+        if not any(paths.values()):
+            self.set_status_message(tr("status.no_last_workspace"))
+            return
+
+        loaded_count = 0
+        failed_count = 0
+
+        edit_file = paths["edit_file"]
+        if edit_file:
+            if os.path.isfile(edit_file):
+                try:
+                    self._fit_edit_on_next_data_change = True
+                    restored = bool(self.logic.open_file(edit_file))
+                except Exception:
+                    restored = False
+                finally:
+                    self._fit_edit_on_next_data_change = False
+                loaded_count += int(restored)
+                failed_count += int(not restored)
+            else:
+                failed_count += 1
+
+        source_file = paths["source_file"]
+        if source_file:
+            if os.path.isfile(source_file):
+                try:
+                    self._fit_source_on_next_data_change = True
+                    restored = bool(self.logic.open_source_file(source_file))
+                except Exception:
+                    restored = False
+                finally:
+                    self._fit_source_on_next_data_change = False
+                loaded_count += int(restored)
+                failed_count += int(not restored)
+            else:
+                failed_count += 1
+
+        for timeline_type, path in (
+            ("source", paths["source_video"]),
+            ("edit", paths["edit_video"]),
+        ):
+            if not path:
+                continue
+            if os.path.isfile(path):
+                try:
+                    restored = bool(
+                        self._load_workspace_video(
+                            path,
+                            timeline_type,
+                            announce=False,
+                        )
+                    )
+                except Exception:
+                    restored = False
+                loaded_count += int(restored)
+                failed_count += int(not restored)
+            else:
+                failed_count += 1
+
+        if failed_count:
+            self.set_status_message(
+                tr(
+                    "status.last_workspace_partial",
+                    loaded=loaded_count,
+                    failed=failed_count,
+                )
+            )
+        else:
+            self.set_status_message(
+                tr("status.last_workspace_restored", count=loaded_count)
+            )
 
     def on_save_as_clicked(self):
         file_path, _ = QFileDialog.getSaveFileName(self, tr("main.save_as_title"), "", tr("main.file_filter_edit"))
@@ -597,7 +822,11 @@ class MainWindow(QMainWindow):
             2,
         )
         if ok and duration_sec > 0:
-            self.new_edit_requested.emit(duration_sec)
+            self._fit_edit_on_next_data_change = True
+            try:
+                self.new_edit_requested.emit(duration_sec)
+            finally:
+                self._fit_edit_on_next_data_change = False
 
     def _get_default_new_edit_duration_sec(self) -> float:
         """Choose the best default duration for a new edit project."""
@@ -670,6 +899,105 @@ class MainWindow(QMainWindow):
         if dialog.exec():
             values = dialog.get_values()
             self.logic.update_frame(frame_time, values['color'], values['function'], values.get('marker'))
+
+    def _update_function_action_icons(self, theme_name):
+        if not hasattr(self, "function_actions"):
+            return
+        profile = get_visual_theme_profile(theme_name)
+        for function, action in enumerate(self.function_actions):
+            action.setIcon(
+                make_function_icon(
+                    function,
+                    profile["function_line"],
+                    profile["timeline_background"],
+                )
+            )
+
+    def on_set_region_function(self, function):
+        start_ms, end_ms = self.edit_timeline.get_selected_region()
+        self.on_set_region_function_requested(start_ms, end_ms, function)
+
+    @Slot(float, float, int)
+    def on_set_region_function_requested(self, start_ms, end_ms, function):
+        if abs(end_ms - start_ms) <= 1:
+            self.set_status_message(tr("status.no_region_selected"))
+            return
+
+        self.logic.set_function_in_region(start_ms, end_ms, function)
+        self.data_table.set_data(
+            self.logic.data_manager.get_segment(start_ms, end_ms)
+        )
+
+    def on_adjust_region_brightness(self):
+        start_ms, end_ms = self.edit_timeline.get_selected_region()
+        self.on_adjust_region_brightness_requested(start_ms, end_ms)
+
+    @Slot(float, float)
+    def on_adjust_region_brightness_requested(self, start_ms, end_ms):
+        if abs(end_ms - start_ms) <= 1:
+            self.set_status_message(tr("status.no_region_selected"))
+            return
+
+        percent, accepted = QInputDialog.getInt(
+            self,
+            tr("dialog.brightness_region.title"),
+            tr("dialog.brightness_region.label"),
+            100,
+            0,
+            200,
+            5,
+        )
+        if not accepted:
+            return
+
+        self._apply_region_brightness(start_ms, end_ms, percent)
+
+    def on_quick_adjust_region_brightness(self, percent):
+        start_ms, end_ms = self.edit_timeline.get_selected_region()
+        if abs(end_ms - start_ms) <= 1:
+            self.set_status_message(tr("status.no_region_selected"))
+            return
+        self._apply_region_brightness(start_ms, end_ms, percent)
+
+    def _apply_region_brightness(self, start_ms, end_ms, percent):
+        self.logic.adjust_brightness_in_region(start_ms, end_ms, percent)
+        self.data_table.set_data(
+            self.logic.data_manager.get_segment(start_ms, end_ms)
+        )
+
+    def on_set_region_color(self):
+        start_ms, end_ms = self.edit_timeline.get_selected_region()
+        self.on_set_region_color_requested(start_ms, end_ms)
+
+    @Slot(float, float)
+    def on_set_region_color_requested(self, start_ms, end_ms):
+        if abs(end_ms - start_ms) <= 1:
+            self.set_status_message(tr("status.no_region_selected"))
+            return
+
+        segment = self.logic.data_manager.get_segment(start_ms, end_ms)
+        prefill_color = {'r': 15, 'g': 15, 'b': 15}
+        if not segment.empty:
+            first_frame = segment.iloc[0]
+            prefill_color = {
+                'r': int(first_frame.get('ch0_red', 15)),
+                'g': int(first_frame.get('ch0_green', 15)),
+                'b': int(first_frame.get('ch0_blue', 15)),
+            }
+
+        dialog = ColorPickerDialog(
+            self,
+            prefill_color=prefill_color,
+            color_only=True,
+        )
+        if not dialog.exec():
+            return
+
+        color = dialog.get_values()['color']
+        self.logic.set_color_in_region(start_ms, end_ms, color)
+        self.data_table.set_data(
+            self.logic.data_manager.get_segment(start_ms, end_ms)
+        )
 
     def on_generate_breathing(self):
         params_config = [
@@ -823,9 +1151,7 @@ class MainWindow(QMainWindow):
             tr("main.file_filter_video")
         )
         if file_path:
-            self.source_preview_widget.load_video(file_path)
-            self.logic.load_video_audio(file_path, 'source')
-            self.set_status_message(tr("status.source_video_loaded", name=os.path.basename(file_path)))
+            self._load_workspace_video(file_path, "source")
 
     def on_import_edit_video(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -835,9 +1161,7 @@ class MainWindow(QMainWindow):
             tr("main.file_filter_video")
         )
         if file_path:
-            self.edit_preview_widget.load_video(file_path)
-            self.logic.load_video_audio(file_path, 'edit')
-            self.set_status_message(tr("status.edit_video_loaded", name=os.path.basename(file_path)))
+            self._load_workspace_video(file_path, "edit")
 
     def on_toggle_sync_playback(self):
         # This would contain the logic to sync playback between timelines and video
@@ -1038,6 +1362,19 @@ class MainWindow(QMainWindow):
 
     def on_edit_region_selected(self, start_ms: float, end_ms: float):
         has_selection = abs(end_ms - start_ms) > 1
+        if hasattr(self, "function_menu"):
+            self.function_menu.setEnabled(has_selection)
+        if hasattr(self, "function_actions"):
+            for action in self.function_actions:
+                action.setEnabled(has_selection)
+        if hasattr(self, "adjust_region_brightness_action"):
+            self.adjust_region_brightness_action.setEnabled(has_selection)
+        if hasattr(self, "set_region_color_action"):
+            self.set_region_color_action.setEnabled(has_selection)
+        if hasattr(self, "increase_region_brightness_action"):
+            self.increase_region_brightness_action.setEnabled(has_selection)
+        if hasattr(self, "decrease_region_brightness_action"):
+            self.decrease_region_brightness_action.setEnabled(has_selection)
         if has_selection:
             self.data_table.set_data(self.logic.data_manager.get_segment(start_ms, end_ms))
         else:
@@ -1052,16 +1389,26 @@ class MainWindow(QMainWindow):
 
     @Slot(pd.DataFrame)
     def on_timeline_data_changed(self, df):
-        auto_zoom = self.should_auto_zoom and (self.is_initial_load or df.empty)
-        self.edit_timeline.set_data(df, auto_zoom=auto_zoom)
+        self.edit_timeline.set_data(
+            df,
+            auto_zoom=self._fit_edit_on_next_data_change,
+        )
         self.data_table.set_data(df)
-        if self.is_initial_load and not df.empty:
-            self.is_initial_load = False
-            self.should_auto_zoom = False
 
     @Slot(pd.DataFrame)
     def on_source_data_changed(self, df):
-        self.source_timeline.set_data(df, auto_zoom=True)
+        self.source_timeline.set_data(
+            df,
+            auto_zoom=self._fit_source_on_next_data_change,
+        )
+
+    @Slot(int)
+    def _on_source_video_loaded(self, duration_ms):
+        self.source_timeline.set_view_range_clamped(0, duration_ms)
+
+    @Slot(int)
+    def _on_edit_video_loaded(self, duration_ms):
+        self.edit_timeline.set_view_range_clamped(0, duration_ms)
 
     @Slot(str)
     def set_status_message(self, message):
@@ -1090,12 +1437,14 @@ class MainWindow(QMainWindow):
                 self.source_timeline_group.apply_visual_theme(theme_name)
             if hasattr(self, "edit_timeline_group"):
                 self.edit_timeline_group.apply_visual_theme(theme_name)
+            self._update_function_action_icons(theme_name)
         except FileNotFoundError:
             self.set_status_message(tr("status.stylesheet_not_found", name=theme_name))
 
     def closeEvent(self, event):
         # Save window geometry and state per PRD 2.3
         settings = QSettings("LumaFlow", "LumaFlow")
+        self._save_last_workspace()
         settings.setValue("geometry", self.saveGeometry())
         settings.setValue("windowState", self.saveState())
         settings.setValue("view/auto_roll", self.auto_roll_action.isChecked())
@@ -1294,6 +1643,7 @@ class MainWindow(QMainWindow):
         serial_panel.udp_host_changed.connect(self._on_udp_host_changed)
         serial_panel.udp_stream_repeats_changed.connect(self._on_udp_stream_repeats_changed)
         serial_panel.ble_device_changed.connect(self._on_ble_device_changed)
+        serial_panel.global_brightness_changed.connect(self._on_global_brightness_changed)
         self._restore_device_output_offsets()
 
         # Initial port list
@@ -1313,6 +1663,13 @@ class MainWindow(QMainWindow):
             repeats = fallback
         return max(UDP_STREAM_REPEATS_MIN, min(UDP_STREAM_REPEATS_MAX, repeats))
 
+    def _coerce_global_brightness(self, value):
+        try:
+            percent = int(value)
+        except (TypeError, ValueError):
+            percent = GLOBAL_BRIGHTNESS_DEFAULT
+        return max(GLOBAL_BRIGHTNESS_MIN, min(GLOBAL_BRIGHTNESS_MAX, percent))
+
     def _restore_device_output_offsets(self):
         """Restore device output settings from QSettings and sync UI + logic."""
         settings = QSettings("LumaFlow", "LumaFlow")
@@ -1326,6 +1683,12 @@ class MainWindow(QMainWindow):
             UDP_STREAM_REPEATS,
         )
         ble_device = settings.value("device_output/ble_device", "", str)
+        global_brightness_enabled = settings.value(
+            "device_output/global_brightness_enabled", False, bool
+        )
+        global_brightness_percent = self._coerce_global_brightness(
+            settings.value("device_output/global_brightness_percent")
+        )
 
         serial_panel = self.device_output_widget.serial_panel
 
@@ -1344,18 +1707,26 @@ class MainWindow(QMainWindow):
         serial_panel.ble_device_combo.blockSignals(True)
         serial_panel.set_ble_device(ble_device)
         serial_panel.ble_device_combo.blockSignals(False)
+        serial_panel.global_brightness_checkbox.blockSignals(True)
+        serial_panel.global_brightness_spin.blockSignals(True)
+        serial_panel.set_global_brightness(global_brightness_enabled, global_brightness_percent)
+        serial_panel.global_brightness_spin.blockSignals(False)
+        serial_panel.global_brightness_checkbox.blockSignals(False)
 
         serial_panel.set_default_offset(serial_offset)
 
         self.logic.set_serial_offset(serial_offset)
         self.logic.set_udp_stream_repeats(udp_stream_repeats)
         self.logic.set_serial_auth_lic(serial_auth_lic)
+        self.logic.set_global_brightness(global_brightness_enabled, global_brightness_percent)
         self._persist_device_output_settings(
             serial_offset=serial_offset,
             serial_auth_lic=serial_auth_lic,
             udp_host=udp_host,
             udp_stream_repeats=udp_stream_repeats,
             ble_device=ble_device,
+            global_brightness_enabled=global_brightness_enabled,
+            global_brightness_percent=global_brightness_percent,
         )
         serial_panel.set_auth_status("Not Sent")
         serial_panel.set_lic_info(self.logic.get_serial_auth_lic_info())
@@ -1367,6 +1738,8 @@ class MainWindow(QMainWindow):
         udp_host=None,
         udp_stream_repeats=None,
         ble_device=None,
+        global_brightness_enabled=None,
+        global_brightness_percent=None,
     ):
         settings = QSettings("LumaFlow", "LumaFlow")
         serial_panel = self.device_output_widget.serial_panel
@@ -1380,11 +1753,19 @@ class MainWindow(QMainWindow):
             udp_stream_repeats = serial_panel.get_udp_stream_repeats()
         if ble_device is None:
             ble_device = serial_panel.get_ble_device()
+        if global_brightness_enabled is None or global_brightness_percent is None:
+            current_enabled, current_percent = serial_panel.get_global_brightness()
+            if global_brightness_enabled is None:
+                global_brightness_enabled = current_enabled
+            if global_brightness_percent is None:
+                global_brightness_percent = current_percent
         settings.setValue("device_output/serial_offset_ms", int(serial_offset))
         settings.setValue("device_output/serial_auth_lic", serial_auth_lic)
         settings.setValue("device_output/udp_host", udp_host)
         settings.setValue("device_output/udp_stream_repeats", int(udp_stream_repeats))
         settings.setValue("device_output/ble_device", ble_device)
+        settings.setValue("device_output/global_brightness_enabled", bool(global_brightness_enabled))
+        settings.setValue("device_output/global_brightness_percent", int(global_brightness_percent))
 
     @Slot(int)
     def _on_serial_offset_changed(self, offset_ms):
@@ -1408,6 +1789,14 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _on_ble_device_changed(self, ble_device):
         self._persist_device_output_settings(ble_device=ble_device)
+
+    @Slot(bool, int)
+    def _on_global_brightness_changed(self, enabled, percent):
+        self.logic.set_global_brightness(enabled, percent)
+        self._persist_device_output_settings(
+            global_brightness_enabled=enabled,
+            global_brightness_percent=percent,
+        )
 
     def on_about(self):
         from .dialogs import AboutDialog

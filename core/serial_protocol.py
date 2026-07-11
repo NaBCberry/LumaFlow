@@ -10,6 +10,9 @@ TLV_TAIL = 0xED
 CMD_STREAM = 0xD8
 CMD_AUTH = 0xE0
 STREAM_PAYLOAD_LENGTH = 20
+GLOBAL_BRIGHTNESS_MIN = 0
+GLOBAL_BRIGHTNESS_MAX = 100
+GLOBAL_BRIGHTNESS_DEFAULT = 100
 
 
 @dataclass(frozen=True)
@@ -134,7 +137,26 @@ def build_tlv_frame(cmd: int, payload: bytes) -> bytes:
     return TLV_HEAD + bytes((length, cmd)) + payload + bytes((checksum, TLV_TAIL))
 
 
-def build_stream_payload(frame: Mapping[str, object]) -> bytes:
+def normalize_brightness_percent(brightness_percent: int) -> int:
+    value = int(brightness_percent)
+    if not GLOBAL_BRIGHTNESS_MIN <= value <= GLOBAL_BRIGHTNESS_MAX:
+        raise ValueError(
+            f"Brightness percentage must be in range "
+            f"{GLOBAL_BRIGHTNESS_MIN}..{GLOBAL_BRIGHTNESS_MAX}."
+        )
+    return value
+
+
+def scale_4bit_brightness(value: int, brightness_percent: int) -> int:
+    """Scale one 4-bit color component with deterministic half-up rounding."""
+    return (value * brightness_percent + 50) // 100
+
+
+def build_stream_payload(
+    frame: Mapping[str, object],
+    brightness_percent: int = GLOBAL_BRIGHTNESS_DEFAULT,
+) -> bytes:
+    brightness_percent = normalize_brightness_percent(brightness_percent)
     payload = bytearray()
     for index in range(10):
         func = int(frame[f"ch{index}_function"])
@@ -146,6 +168,9 @@ def build_stream_payload(frame: Mapping[str, object]) -> bytes:
             if not 0 <= value <= 0x0F:
                 raise ValueError(f"Channel {index} {label} value must be in range 0..15.")
 
+        red = scale_4bit_brightness(red, brightness_percent)
+        green = scale_4bit_brightness(green, brightness_percent)
+        blue = scale_4bit_brightness(blue, brightness_percent)
         payload.append(((func & 0x0F) << 4) | (red & 0x0F))
         payload.append(((green & 0x0F) << 4) | (blue & 0x0F))
 
@@ -154,8 +179,11 @@ def build_stream_payload(frame: Mapping[str, object]) -> bytes:
     return bytes(payload)
 
 
-def build_stream_frame(frame: Mapping[str, object]) -> bytes:
-    return build_tlv_frame(CMD_STREAM, build_stream_payload(frame))
+def build_stream_frame(
+    frame: Mapping[str, object],
+    brightness_percent: int = GLOBAL_BRIGHTNESS_DEFAULT,
+) -> bytes:
+    return build_tlv_frame(CMD_STREAM, build_stream_payload(frame, brightness_percent))
 
 
 def build_auth_payload(host_time: int, expire_time: int, signature: bytes) -> bytes:

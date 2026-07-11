@@ -113,6 +113,8 @@ dist/
 *.exe
 *.msi
 *.zip
+*.zip.sha256
+*_Portable/
 
 # Audio cache and generated data
 audio_cache/

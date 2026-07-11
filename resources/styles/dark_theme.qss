@@ -120,6 +120,59 @@ QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {
     border: 1px solid #0078D4; /* Adobe Blue Accent */
 }
 
+QComboBox {
+    background-color: #2A2A2A;
+    color: #DCDCDC;
+    border: 1px solid #4F4F4F;
+    padding: 4px 26px 4px 6px;
+    border-radius: 3px;
+}
+
+QComboBox:hover, QComboBox:focus {
+    border-color: #0078D4;
+}
+
+QComboBox:disabled {
+    background-color: #404040;
+    color: #888888;
+    border-color: #555555;
+}
+
+QComboBox QAbstractItemView {
+    background-color: #2A2A2A;
+    color: #DCDCDC;
+    border: 1px solid #4F4F4F;
+    outline: 0px;
+    selection-background-color: #0078D4;
+    selection-color: #FFFFFF;
+}
+
+
+/* --- Dock Widgets --- */
+QDockWidget {
+    background-color: #323232;
+    color: #DCDCDC;
+    border: 1px solid #4F4F4F;
+}
+
+QDockWidget::title {
+    background-color: #3C3C3C;
+    color: #DCDCDC;
+    text-align: left;
+    padding: 4px 6px;
+    border-bottom: 1px solid #2A2A2A;
+}
+
+QDockWidget::close-button, QDockWidget::float-button {
+    background-color: transparent;
+    border: 0px;
+    padding: 1px;
+}
+
+QDockWidget::close-button:hover, QDockWidget::float-button:hover {
+    background-color: #555555;
+}
+
 
 /* --- Table View --- */
 QTableView {

@@ -2,17 +2,20 @@ import asyncio
 import serial
 import serial.tools.list_ports
 import socket
+import sys
 import threading
 import time
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from ipaddress import AddressValueError, IPv4Address
 from PySide6.QtCore import QObject, Signal
 
+_BLE_IMPORT_ERROR = None
 try:
     from bleak import BleakClient, BleakScanner
-except ImportError:
+except ImportError as exc:
     BleakClient = None
     BleakScanner = None
+    _BLE_IMPORT_ERROR = exc
 
 UDP_DEFAULT_PORT = 32712
 TLV_HEAD = bytes((0xEB, 0x90))
@@ -33,6 +36,20 @@ BLE_CONNECT_TIMEOUT_SEC = 10.0
 BLE_WRITE_TIMEOUT_SEC = 1.0
 BLE_DISCONNECT_TIMEOUT_SEC = 2.0
 BLE_FALLBACK_WRITE_CHUNK = 20
+SERIAL_CONNECT_SETTLE_SEC = 0.15
+SERIAL_AUTH_REPEATS = 3
+SERIAL_AUTH_REPEAT_DELAY_SEC = 0.05
+
+
+def get_ble_unavailable_message():
+    """Explain whether BLE is missing from source dependencies or the package."""
+    detail = f" ({_BLE_IMPORT_ERROR})" if _BLE_IMPORT_ERROR else ""
+    if getattr(sys, "frozen", False):
+        return f"This LumaFlow package does not include BLE support{detail}. Reinstall a BLE-enabled build."
+    return (
+        f"BLE support is unavailable{detail}. Run: "
+        f'"{sys.executable}" -m pip install bleak'
+    )
 
 
 def normalize_udp_host(value):
@@ -65,7 +82,7 @@ def normalize_udp_host(value):
 def scan_lumaflow_ble_devices(timeout=BLE_SCAN_TIMEOUT_SEC, device_callback=None):
     """Scan for LumaFlow BLE devices using Web-style name-prefix matching."""
     if BleakScanner is None:
-        raise RuntimeError("BLE support requires bleak. Run: pip install bleak")
+        raise RuntimeError(get_ble_unavailable_message())
     return asyncio.run(_scan_lumaflow_ble_devices_async(float(timeout), device_callback))
 
 
@@ -180,7 +197,7 @@ class SerialDeviceManager(QObject):
         if BleakScanner is None:
             self.connection_changed.emit(
                 False,
-                "BLE support requires bleak. Run: pip install bleak"
+                get_ble_unavailable_message(),
             )
             return []
 
@@ -203,14 +220,36 @@ class SerialDeviceManager(QObject):
 
     def _connect_serial(self, port, baud_rate):
         """Connect to the specified serial port."""
+        serial_port = None
         try:
-            self.serial_port = serial.Serial(port, baudrate=baud_rate, timeout=1)
+            serial_port = serial.Serial(
+                port=None,
+                baudrate=baud_rate,
+                timeout=1,
+                write_timeout=1,
+                rtscts=False,
+                dsrdtr=False,
+            )
+            # Avoid asserting both control lines while opening ESP USB serial.
+            serial_port.dtr = False
+            serial_port.rts = False
+            serial_port.port = port
+            serial_port.open()
+            serial_port.reset_input_buffer()
+            serial_port.reset_output_buffer()
+            self.serial_port = serial_port
             self.transport = 'serial'
             self.frames_sent = 0
             self.last_sent_frame_index = -1
             self.frame_sent.emit(0)
+            time.sleep(SERIAL_CONNECT_SETTLE_SEC)
             return True
-        except serial.SerialException as e:
+        except (serial.SerialException, ValueError) as e:
+            if serial_port is not None:
+                try:
+                    serial_port.close()
+                except Exception:
+                    pass
             self.serial_port = None
             self.connection_changed.emit(False, f"Connection failed: {e}")
             return False
@@ -237,7 +276,7 @@ class SerialDeviceManager(QObject):
         if BleakClient is None:
             self.connection_changed.emit(
                 False,
-                "BLE support requires bleak. Run: pip install bleak"
+                get_ble_unavailable_message(),
             )
             return False
 
@@ -389,7 +428,7 @@ class SerialDeviceManager(QObject):
             elif self.transport == 'ble':
                 self._send_ble_data(data_bytes)
             else:
-                self.serial_port.write(data_bytes)
+                self._send_serial_data(data_bytes)
             if count_frame:
                 self.frames_sent += 1
                 self.frame_sent.emit(self.frames_sent)
@@ -398,6 +437,19 @@ class SerialDeviceManager(QObject):
             print(f"Send error: {e}")
             self.disconnect(message=f"Disconnected: {e}")
             return False
+
+    def _send_serial_data(self, data_bytes):
+        data = bytes(data_bytes)
+        repeat_count = SERIAL_AUTH_REPEATS if self._get_tlv_command(data) == CMD_AUTH else 1
+        for index in range(repeat_count):
+            written = self.serial_port.write(data)
+            if written != len(data):
+                raise serial.SerialTimeoutException(
+                    f"Serial write incomplete: {written}/{len(data)} bytes"
+                )
+            self.serial_port.flush()
+            if index + 1 < repeat_count:
+                time.sleep(SERIAL_AUTH_REPEAT_DELAY_SEC)
 
     def _send_udp_data(self, data_bytes):
         data = bytes(data_bytes)

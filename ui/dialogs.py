@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QColor, QPixmap, QPainter, QPen, QBrush, QPainterPath, QIcon
 from PySide6.QtCore import Qt, Signal
+import colorsys
 import math
 import numpy as np
 import platform
@@ -201,14 +202,27 @@ class CalibrationDialog(QDialog):
         return self.r_spin.value(), self.g_spin.value(), self.b_spin.value()
 class ColorPickerDialog(QDialog):
     """A dialog for inserting a custom color keyframe."""
-    def __init__(self, parent=None, prefill_color=None, prefill_function=0, prefill_marker=""):
+    def __init__(
+        self,
+        parent=None,
+        prefill_color=None,
+        prefill_function=0,
+        prefill_marker="",
+        color_only=False,
+    ):
         super().__init__(parent)
-        self.setWindowTitle(tr("dialog.color_frame.title"))
+        self.color_only = bool(color_only)
+        self.setWindowTitle(
+            tr("dialog.region_color.title")
+            if self.color_only
+            else tr("dialog.color_frame.title")
+        )
         self.setModal(True)
         self._prefill_color = prefill_color or {'r': 15, 'g': 15, 'b': 15}
         self._prefill_function = prefill_function
         self._prefill_marker = prefill_marker
         self.init_ui()
+        self._sync_wheel_from_rgb()
         self.update_preview()
         self.setMinimumWidth(400)
 
@@ -254,8 +268,8 @@ class ColorPickerDialog(QDialog):
         main_layout.addWidget(color_group)
 
         # --- Additional Options Group ---
-        options_group = QGroupBox(tr("dialog.color_frame.group_options"))
-        options_layout = QFormLayout(options_group)
+        self.options_group = QGroupBox(tr("dialog.color_frame.group_options"))
+        options_layout = QFormLayout(self.options_group)
         
         self.function_combo = QComboBox()
         self.function_combo.addItems([
@@ -271,7 +285,8 @@ class ColorPickerDialog(QDialog):
         self.marker_edit.setPlaceholderText(tr("dialog.color_frame.marker_placeholder"))
         self.marker_edit.setText(self._prefill_marker)
         options_layout.addRow(tr("dialog.color_frame.marker"), self.marker_edit)
-        main_layout.addWidget(options_group)
+        main_layout.addWidget(self.options_group)
+        self.options_group.setVisible(not self.color_only)
 
         # --- Presets Group ---
         preset_group = QGroupBox(tr("dialog.color_frame.group_presets"))
@@ -307,9 +322,16 @@ class ColorPickerDialog(QDialog):
         self.b_spinbox.valueChanged.connect(self.on_spinbox_changed)
 
     def set_preset_color(self, r, g, b):
+        spinboxes = (self.r_spinbox, self.g_spinbox, self.b_spinbox)
+        for spinbox in spinboxes:
+            spinbox.blockSignals(True)
         self.r_spinbox.setValue(r)
         self.g_spinbox.setValue(g)
         self.b_spinbox.setValue(b)
+        for spinbox in spinboxes:
+            spinbox.blockSignals(False)
+        self._sync_wheel_from_rgb()
+        self.update_preview()
 
     def on_wheel_color_selected(self, r, g, b):
         """Update spinboxes when color wheel is clicked"""
@@ -330,7 +352,19 @@ class ColorPickerDialog(QDialog):
 
     def on_spinbox_changed(self):
         """Update preview when spinboxes change"""
+        self._sync_wheel_from_rgb()
         self.update_preview()
+
+    def _sync_wheel_from_rgb(self):
+        """Keep the wheel marker and brightness aligned with the RGB fields."""
+        self.color_wheel.set_color(
+            self.r_spinbox.value(),
+            self.g_spinbox.value(),
+            self.b_spinbox.value(),
+        )
+        self.brightness_slider.blockSignals(True)
+        self.brightness_slider.setValue(round(self.color_wheel.selected_value * 100))
+        self.brightness_slider.blockSignals(False)
 
     def update_preview(self):
         r, g, b = self.r_spinbox.value(), self.g_spinbox.value(), self.b_spinbox.value()
@@ -556,6 +590,20 @@ class HSVColorWheelWidget(QWidget):
         self._render_wheel()
         self.update()
         self._emit_color()
+
+    def set_color(self, r, g, b):
+        """Set wheel selection from a 4-bit RGB color without emitting a change."""
+        red = max(0, min(15, int(r))) / 15.0
+        green = max(0, min(15, int(g))) / 15.0
+        blue = max(0, min(15, int(b))) / 15.0
+        hue, saturation, value = colorsys.rgb_to_hsv(red, green, blue)
+        value_changed = not math.isclose(value, self.selected_value)
+        self.selected_hue = hue
+        self.selected_saturation = saturation
+        self.selected_value = value
+        if value_changed:
+            self._render_wheel()
+        self.update()
 
     def _emit_color(self):
         """Convert HSV to 4-bit RGB and emit signal"""

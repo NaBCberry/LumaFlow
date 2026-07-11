@@ -1,4 +1,5 @@
 # Standard library imports
+import math
 import sys
 import os
 import time
@@ -30,6 +31,7 @@ from ui.timeline_rendering import (
 )
 from ui.timeline_theme import get_visual_theme_profile
 from ui.timeline_tools import ToolManager
+from ui.function_visuals import make_function_brush, make_function_icon
 
 
 def _as_qcolor(value):
@@ -345,6 +347,26 @@ class RenderWorker(QObject):
         color_change_score = np.minimum(500.0, max_color_change * 2)
         # +++ FIX: 显式转换为 float32 (尽管 max_color_change 已经是 float32, 但这样做更安全) +++
         scores += color_change_score.astype(np.float32)
+
+        # --- 5. Function 模式与切换检测 (高优先级) ---
+        function_cols = [
+            f'ch{i}_function' for i in range(10)
+            if f'ch{i}_function' in df.columns
+        ]
+        if function_cols:
+            function_values = df[function_cols].fillna(0).astype(np.int16)
+            function_active = function_values.ne(0).any(axis=1)
+            transition_from_previous = function_values.ne(
+                function_values.shift(1)
+            ).any(axis=1)
+            transition_to_next = function_values.ne(
+                function_values.shift(-1)
+            ).any(axis=1)
+            transition_from_previous.iloc[0] = False
+            transition_to_next.iloc[-1] = False
+            function_transition = transition_from_previous | transition_to_next
+            scores += function_active.astype(np.float32) * 600.0
+            scores += function_transition.astype(np.float32) * 800.0
         
         return scores
 
@@ -357,13 +379,19 @@ class FastScatterItem(pg.GraphicsObject):
     """
     高性能散点图项 - 统一矩形渲染
     """
+    FUNCTION_FREQUENCIES_HZ = {1: 1, 2: 2, 3: 4}
+
     def __init__(self):
         super().__init__()
         self.data = None
         self.is_raw_data = False
         self._boundingRect = QRectF()
         self.frame_pen = pg.mkPen(color=(0, 0, 0), width=1, style=Qt.DashDotDotLine)
-        self.function_pen = QPen(QColor(40, 40, 40), 1)
+        self.function_brushes = {
+            mode: make_function_brush(mode, QColor(40, 40, 40))
+            for mode in range(1, 4)
+        }
+        self.function_indicator_color = QColor(40, 40, 40)
 
     def setData(self, data, boundingRect, is_raw_data=False):
         self.data = data
@@ -375,51 +403,133 @@ class FastScatterItem(pg.GraphicsObject):
     def clear(self):
         self.setData(None, QRectF(), False)
 
+    def _iter_function_runs(self):
+        if self.data is None or 'function' not in self.data:
+            return []
+
+        channel_indices = {}
+        for index, channel in enumerate(self.data['y']):
+            channel_indices.setdefault(int(channel), []).append(index)
+
+        runs = []
+        for channel, indices in channel_indices.items():
+            current = None
+            for index in indices:
+                mode = int(self.data['function'][index])
+                start_ms = float(self.data['x'][index])
+                end_ms = start_ms + max(0.0, float(self.data['w'][index]))
+                if current is not None:
+                    tolerance = max(0.01, abs(current[1]) * 1e-9)
+                    is_contiguous = abs(start_ms - current[1]) <= tolerance
+                    if mode == current[3] and is_contiguous:
+                        current[1] = max(current[1], end_ms)
+                        continue
+                    if current[3] in self.FUNCTION_FREQUENCIES_HZ:
+                        runs.append(tuple(current))
+                current = [start_ms, end_ms, channel, mode]
+
+            if current is not None and current[3] in self.FUNCTION_FREQUENCIES_HZ:
+                runs.append(tuple(current))
+        return runs
+
+    def _draw_function_indicator(self, painter, transform, run):
+        start_ms, end_ms, channel, mode = run
+        frequency_hz = self.FUNCTION_FREQUENCIES_HZ.get(mode)
+        if frequency_hz is None or end_ms <= start_ms:
+            return
+
+        logical_rect = QRectF(start_ms, channel - 0.5, end_ms - start_ms, 1.0)
+        screen_rect = transform.mapRect(logical_rect)
+        if screen_rect.width() < 3.0 or screen_rect.height() <= 0.0:
+            return
+
+        strip_height = min(8.0, max(3.0, screen_rect.height() * 0.16))
+        strip_rect = QRectF(
+            screen_rect.left(),
+            screen_rect.top(),
+            screen_rect.width(),
+            strip_height,
+        )
+        visible_rect = strip_rect.intersected(QRectF(painter.viewport()))
+        if visible_rect.isEmpty():
+            return
+
+        backing_color = QColor(self.function_indicator_color)
+        backing_color.setAlpha(60)
+        painter.fillRect(strip_rect, backing_color)
+
+        origin_x = transform.map(QPointF(start_ms, 0.0)).x()
+        one_ms_x = transform.map(QPointF(start_ms + 1.0, 0.0)).x()
+        pixels_per_ms = abs(one_ms_x - origin_x)
+        half_period_px = pixels_per_ms * (500.0 / frequency_hz)
+        if half_period_px >= 2.0:
+            wave_color = QColor(self.function_indicator_color)
+            wave_color.setAlpha(220)
+            phase_index = math.floor(
+                (visible_rect.left() - origin_x) / half_period_px
+            )
+            phase_start = origin_x + phase_index * half_period_px
+            while phase_start < visible_rect.right():
+                phase_end = phase_start + half_period_px
+                if phase_index % 2 == 0:
+                    left = max(phase_start, visible_rect.left())
+                    right = min(phase_end, visible_rect.right())
+                    if right > left:
+                        painter.fillRect(
+                            QRectF(left, strip_rect.top(), right - left, strip_height),
+                            wave_color,
+                        )
+                phase_index += 1
+                phase_start = phase_end
+
     def paint(self, painter, option, widget):
         if self.data is None or len(self.data['x']) == 0:
             return
 
         painter.save()
         try:
-            # 遍历所有要绘制的点 (每个点代表一个通道的一个矩形)
+            # 1. 绘制所有通道的背景色
+            painter.setPen(Qt.NoPen)
             for i in range(len(self.data['x'])):
                 # 直接使用 QColor 效率更高
                 painter.setBrush(QColor(self.data['r'][i], self.data['g'][i], self.data['b'][i]))
-
-                # 1. 先绘制一个没有边框的填充矩形
-                painter.setPen(Qt.NoPen)
                 rect = QRectF(self.data['x'][i], self.data['y'][i] - 0.5, self.data['w'][i], 1.0)
                 painter.drawRect(rect)
 
-                # 2. 绘制功能模式纹理 (仅在非合并模式下)
-                if self.is_raw_data and 'function' in self.data:
-                    func_mode = self.data['function'][i]
-                    if func_mode > 0:  # 跳过模式0 (常亮)
-                        self._draw_vertical_lines(painter, rect, func_mode)
+            # 2. 绘制功能模式纹理（在屏幕像素空间绘制，防止畸变和缩放失真）
+            if 'function' in self.data:
+                orig_transform = painter.transform()
+                painter.resetTransform()
+                try:
+                    for i in range(len(self.data['x'])):
+                        func_mode = self.data['function'][i]
+                        function_brush = self.function_brushes.get(int(func_mode))
+                        if function_brush is not None:
+                            # 将逻辑矩形映射到屏幕像素空间
+                            rect = QRectF(self.data['x'][i], self.data['y'][i] - 0.5, self.data['w'][i], 1.0)
+                            screen_rect = orig_transform.mapRect(rect)
 
-                # 3. 再使用画笔单独绘制这个矩形的左边框
-                painter.setPen(self.frame_pen)
-                # 获取矩形的左上角和左下角坐标
-                p1 = rect.topLeft()
-                p2 = rect.bottomLeft()
-                painter.drawLine(p1, p2)
+                            # 性能及视觉保护：宽度过窄的数据帧块不铺设纹理，防止过度挤压
+                            if screen_rect.width() >= 3.0:
+                                painter.fillRect(screen_rect, function_brush)
+
+                    for run in self._iter_function_runs():
+                        self._draw_function_indicator(painter, orig_transform, run)
+                finally:
+                    painter.setTransform(orig_transform)
+
+            # 3. 分隔线始终位于纹理上层，避免高密度纹理削弱帧边界。
+            painter.setPen(self.frame_pen)
+            for i in range(len(self.data['x'])):
+                rect = QRectF(
+                    self.data['x'][i],
+                    self.data['y'][i] - 0.5,
+                    self.data['w'][i],
+                    1.0,
+                )
+                painter.drawLine(rect.topLeft(), rect.bottomLeft())
         finally:
             painter.restore()
-
-    def _draw_vertical_lines(self, painter, rect, func_mode):
-        """根据功能模式绘制垂直线纹理"""
-        line_counts = {1: 2, 2: 3, 3: 5}  # 1Hz=2线, 2Hz=3线, 4Hz=5线
-        num_lines = line_counts.get(func_mode, 0)
-
-        if num_lines == 0 or rect.width() < 3:  # 太窄则跳过
-            return
-
-        painter.setPen(self.function_pen)  # 深灰色, 1像素宽
-
-        # 在帧宽度内均匀分布线条
-        for j in range(num_lines):
-            x_offset = rect.left() + (j + 1) * rect.width() / (num_lines + 1)
-            painter.drawLine(QPointF(x_offset, rect.top()), QPointF(x_offset, rect.bottom()))
 
     def boundingRect(self):
         return self._boundingRect
@@ -430,7 +540,11 @@ class FastScatterItem(pg.GraphicsObject):
             width=1,
             style=Qt.DashDotDotLine,
         )
-        self.function_pen = QPen(_as_qcolor(profile["function_line"]), 1)
+        self.function_brushes = {
+            mode: make_function_brush(mode, profile["function_line"])
+            for mode in range(1, 4)
+        }
+        self.function_indicator_color = _as_qcolor(profile["function_line"])
         self.update()
 
 class IDXIndicatorsItem(pg.GraphicsObject):
@@ -680,6 +794,9 @@ class TimelineWidget(pg.PlotWidget):
     copy_requested = Signal(float, float, str)  # start_ms, end_ms, timeline_type
     paste_requested = Signal(float, str)        # at_ms, timeline_type
     delete_requested = Signal(float, float, str) # start_ms, end_ms, timeline_type
+    set_function_requested = Signal(float, float, int)
+    adjust_brightness_requested = Signal(float, float)
+    set_color_requested = Signal(float, float)
     # Signal for updating marker
     update_marker_requested = Signal(float, str)
     # Signal for audio vertical zoom (Alt+Wheel)
@@ -809,6 +926,7 @@ class TimelineWidget(pg.PlotWidget):
 
     def apply_visual_theme(self, theme_name: str):
         profile = get_visual_theme_profile(theme_name)
+        self.visual_theme_profile = profile
         self.setBackground(profile["timeline_background"])
         self.plot_item.showGrid(x=True, y=True, alpha=float(profile["grid_alpha"]))
 
@@ -1477,10 +1595,7 @@ class TimelineWidget(pg.PlotWidget):
             return self.current_data.iloc[best_idx], best_time
         return None, None
 
-    def show_context_menu(self, global_pos, time_ms: float):
-        """
-        Per PRD 5.3: Show context menu at position with auto-snapped time.
-        """
+    def _create_context_menu(self, time_ms: float):
         from PySide6.QtWidgets import QMenu
 
         menu = QMenu(self)
@@ -1496,6 +1611,44 @@ class TimelineWidget(pg.PlotWidget):
         if self.timeline_type == 'edit':
             paste_action = menu.addAction(tr("action.paste"))
             paste_action.triggered.connect(lambda: self.paste_requested.emit(time_ms, self.timeline_type))
+
+            start_ms, end_ms = self.get_selected_region()
+            function_menu = menu.addMenu(tr("menu.set_function"))
+            function_menu.setEnabled(abs(end_ms - start_ms) > 1)
+            profile = getattr(
+                self,
+                "visual_theme_profile",
+                get_visual_theme_profile("dark_theme"),
+            )
+            for function in range(4):
+                function_action = function_menu.addAction(
+                    make_function_icon(
+                        function,
+                        profile["function_line"],
+                        profile["timeline_background"],
+                    ),
+                    tr(f"function.mode_{function}"),
+                )
+                function_action.triggered.connect(
+                    lambda _checked=False, mode=function, start=start_ms, end=end_ms:
+                        self.set_function_requested.emit(start, end, mode)
+                )
+
+            brightness_action = menu.addAction(
+                tr("action.adjust_region_brightness")
+            )
+            brightness_action.setEnabled(abs(end_ms - start_ms) > 1)
+            brightness_action.triggered.connect(
+                lambda _checked=False, start=start_ms, end=end_ms:
+                    self.adjust_brightness_requested.emit(start, end)
+            )
+
+            color_action = menu.addAction(tr("action.set_region_color"))
+            color_action.setEnabled(abs(end_ms - start_ms) > 1)
+            color_action.triggered.connect(
+                lambda _checked=False, start=start_ms, end=end_ms:
+                    self.set_color_requested.emit(start, end)
+            )
 
             menu.addSeparator()
 
@@ -1528,6 +1681,11 @@ class TimelineWidget(pg.PlotWidget):
         marker_action = menu.addAction(tr("action.add_marker"))
         marker_action.triggered.connect(lambda: self._add_marker_at(time_ms))
 
+        return menu
+
+    def show_context_menu(self, global_pos, time_ms: float):
+        """Show the timeline context menu at an auto-snapped time."""
+        menu = self._create_context_menu(time_ms)
         menu.exec(global_pos)
 
     def _emit_cut(self, time_ms: float):

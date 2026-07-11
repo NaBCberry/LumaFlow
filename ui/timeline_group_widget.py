@@ -127,8 +127,10 @@ class TimelineGroupWidget(QWidget):
         self.timeline.set_data(df, auto_zoom=auto_zoom)
 
     def set_audio_data(self, audio_data):
-        """Set audio visualization data"""
+        """Set audio data without changing the timeline's visible range."""
+        x_range = self.timeline.plot_item.viewRange()[0]
         self.audio_track.set_audio_data(audio_data)
+        self.audio_track.set_x_range(x_range[0], x_range[1])
 
     def show_audio_track(self, show: bool = True):
         """Show or hide the audio track"""

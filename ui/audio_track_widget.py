@@ -175,23 +175,24 @@ class AudioTrackWidget(pg.PlotWidget):
             self._syncing = False
 
     def set_audio_data(self, audio_data):
-        """设置音频数据"""
-        self.audio_viz_item.setAudioData(audio_data)
+        """设置音频数据，同时禁止范围信号反向改变灯光时间轴。"""
+        self._syncing = True
+        try:
+            self.audio_viz_item.setAudioData(audio_data)
 
-        if audio_data is not None:
-            # 将频率信息传递给坐标轴
-            self.freq_axis.mel_frequencies = audio_data.frequencies
+            if audio_data is not None:
+                # 将频率信息传递给坐标轴
+                self.freq_axis.mel_frequencies = audio_data.frequencies
 
-            # 设置 Y 轴范围为实际的 Mel 频段数量
-            n_mels = audio_data.spectrogram.shape[0] if audio_data.spectrogram is not None else 128
-            self.plot_item.setYRange(0, n_mels, padding=0)
+                # 设置 Y 轴范围为实际的 Mel 频段数量
+                n_mels = audio_data.spectrogram.shape[0] if audio_data.spectrogram is not None else 128
+                self.plot_item.setYRange(0, n_mels, padding=0)
 
-            # 强制坐标轴重新生成刻度标签
-            self.freq_axis.setTicks(None)
-            self.freq_axis.update()
-
-            # 自动调整 X 轴到全长
-            self.plot_item.setXRange(0, audio_data.duration_ms, padding=0.02)
+                # 强制坐标轴重新生成刻度标签
+                self.freq_axis.setTicks(None)
+                self.freq_axis.update()
+        finally:
+            self._syncing = False
 
     def set_playback_head_time(self, time_ms: float):
         """设置播放头位置"""

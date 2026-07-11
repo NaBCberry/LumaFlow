@@ -4,7 +4,7 @@ from PySide6.QtCore import QObject, Signal, Slot, QThread
 import pandas as pd
 
 from core.data_manager import DataManager
-from core.undo_manager import UndoManager, CutCommand, CopyCommand, PasteCommand, DeleteCommand, InsertEffectCommand, AddMarkerCommand, InsertFrameCommand, OffsetCommand, UpdateFrameCommand
+from core.undo_manager import AdjustBrightnessInRegionCommand, SetColorInRegionCommand, UndoManager, CutCommand, CopyCommand, PasteCommand, DeleteCommand, InsertEffectCommand, AddMarkerCommand, InsertFrameCommand, OffsetCommand, SetFunctionInRegionCommand, UpdateFrameCommand
 from core.clipboard_manager import ClipboardManager
 from core.effects import EffectGenerator
 from core.audio_manager import AudioManager
@@ -12,7 +12,14 @@ from core.serial_device_manager import SerialDeviceManager
 from core.device_output_worker import DeviceOutputWorker
 from core.color_calibration import color_calibration
 from core.i18n import tr
-from core.serial_protocol import build_auth_frame, build_stream_frame, describe_auth_lic
+from core.serial_protocol import (
+    GLOBAL_BRIGHTNESS_DEFAULT,
+    GLOBAL_BRIGHTNESS_MAX,
+    GLOBAL_BRIGHTNESS_MIN,
+    build_auth_frame,
+    build_stream_frame,
+    describe_auth_lic,
+)
 
 class AppLogic(QObject):
     # Signals to update the UI
@@ -35,6 +42,11 @@ class AppLogic(QObject):
     serial_frame_sent = Signal(int)  # frames_sent count
     serial_auth_status_changed = Signal(str)
     serial_auth_lic_info_changed = Signal(object)
+    serial_connection_busy_changed = Signal(bool)
+    _device_connect_requested = Signal(str, int, bytes)
+    _device_disconnect_requested = Signal()
+    _device_frame_requested = Signal(int, object)
+    _device_tracking_reset_requested = Signal()
 
     def __init__(self):
         super().__init__()
@@ -44,6 +56,7 @@ class AppLogic(QObject):
         self.clipboard_manager = ClipboardManager()
         self.audio_manager = AudioManager()
         self.current_file_path = None
+        self.current_source_file_path = None
         self.current_source_video_path = None
         self.current_edit_video_path = None
         self.source_audio_duration_ms = None
@@ -52,6 +65,8 @@ class AppLogic(QObject):
         # Device managers
         self.serial_device = SerialDeviceManager()
         self.serial_auth_lic = ""
+        self.global_brightness_enabled = False
+        self.global_brightness_percent = GLOBAL_BRIGHTNESS_DEFAULT
 
         # Device output worker thread
         self.device_thread = QThread()
@@ -61,6 +76,12 @@ class AppLogic(QObject):
             self.build_serial_packet
         )
         self.device_worker.moveToThread(self.device_thread)
+        self._device_connect_requested.connect(self.device_worker.connect_to_device)
+        self._device_disconnect_requested.connect(self.device_worker.disconnect_device)
+        self._device_frame_requested.connect(self.device_worker.send_to_devices)
+        self._device_tracking_reset_requested.connect(self.device_worker.reset_tracking)
+        self.device_worker.auth_status_changed.connect(self.serial_auth_status_changed.emit)
+        self.device_worker.operation_finished.connect(self._on_device_operation_finished)
         self.device_thread.start()
 
         # Connect audio manager signals
@@ -71,6 +92,10 @@ class AppLogic(QObject):
         # Connect device manager signals
         self.serial_device.connection_changed.connect(self.serial_connection_changed.emit)
         self.serial_device.frame_sent.connect(self.serial_frame_sent.emit)
+
+    @Slot()
+    def _on_device_operation_finished(self):
+        self.serial_connection_busy_changed.emit(False)
 
     def _execute_command(self, command, success_message_key=None, failure_message_key=None):
         try:
@@ -103,16 +128,21 @@ class AppLogic(QObject):
             self.undo_manager.redo_stack.clear()
             self.undo_stack_changed.emit(False)
             self.redo_stack_changed.emit(False)
+            return True
         else:
             self.status_message_changed.emit(tr("status.open_failed", path=file_path))
+            return False
 
     @Slot(str)
     def open_source_file(self, file_path):
         if self.source_data_manager.load_csv(file_path):
+            self.current_source_file_path = file_path
             self.source_data_changed.emit(self.source_data_manager.get_full_data())
             self.status_message_changed.emit(tr("status.opened_source_file", path=file_path))
+            return True
         else:
             self.status_message_changed.emit(tr("status.open_source_failed", path=file_path))
+            return False
 
     @Slot(str)
     def save_file(self, file_path=None):
@@ -180,6 +210,91 @@ class AppLogic(QObject):
         if start_ms >= end_ms: return
         command = DeleteCommand(self.data_manager, start_ms, end_ms)
         self._execute_command(command)
+
+    @Slot(float, float, int)
+    def set_function_in_region(self, start_ms, end_ms, function):
+        command = SetFunctionInRegionCommand(
+            self.data_manager,
+            start_ms,
+            end_ms,
+            function,
+        )
+        try:
+            self.undo_manager.execute(command)
+            self.timeline_data_changed.emit(self.data_manager.get_full_data())
+            function_name = tr(f"function.mode_{command.function}")
+            self.status_message_changed.emit(
+                tr(
+                    "status.function_region_updated",
+                    count=command.affected_count,
+                    function=function_name,
+                )
+            )
+        except Exception as exc:
+            self.status_message_changed.emit(
+                tr("status.function_region_failed", error=exc)
+            )
+        finally:
+            self.undo_stack_changed.emit(len(self.undo_manager.undo_stack) > 0)
+            self.redo_stack_changed.emit(len(self.undo_manager.redo_stack) > 0)
+
+    @Slot(float, float, int)
+    def adjust_brightness_in_region(self, start_ms, end_ms, percent):
+        if int(percent) == 100:
+            self.status_message_changed.emit(tr("status.brightness_region_unchanged"))
+            return
+
+        command = AdjustBrightnessInRegionCommand(
+            self.data_manager,
+            start_ms,
+            end_ms,
+            percent,
+        )
+        try:
+            self.undo_manager.execute(command)
+            self.timeline_data_changed.emit(self.data_manager.get_full_data())
+            self.status_message_changed.emit(
+                tr(
+                    "status.brightness_region_updated",
+                    count=command.affected_count,
+                    percent=command.percent,
+                )
+            )
+        except Exception as exc:
+            self.status_message_changed.emit(
+                tr("status.brightness_region_failed", error=exc)
+            )
+        finally:
+            self.undo_stack_changed.emit(len(self.undo_manager.undo_stack) > 0)
+            self.redo_stack_changed.emit(len(self.undo_manager.redo_stack) > 0)
+
+    @Slot(float, float, dict)
+    def set_color_in_region(self, start_ms, end_ms, color):
+        command = SetColorInRegionCommand(
+            self.data_manager,
+            start_ms,
+            end_ms,
+            color,
+        )
+        try:
+            self.undo_manager.execute(command)
+            self.timeline_data_changed.emit(self.data_manager.get_full_data())
+            self.status_message_changed.emit(
+                tr(
+                    "status.color_region_updated",
+                    count=command.affected_count,
+                    r=command.color['r'],
+                    g=command.color['g'],
+                    b=command.color['b'],
+                )
+            )
+        except Exception as exc:
+            self.status_message_changed.emit(
+                tr("status.color_region_failed", error=exc)
+            )
+        finally:
+            self.undo_stack_changed.emit(len(self.undo_manager.undo_stack) > 0)
+            self.redo_stack_changed.emit(len(self.undo_manager.redo_stack) > 0)
 
     @Slot()
     def undo(self):
@@ -328,6 +443,7 @@ class AppLogic(QObject):
         try:
             # Create a new data manager for the edit timeline
             self.data_manager = DataManager()
+            self.current_file_path = None
             duration_ms = duration_sec * 1000
             
             # Get columns from source data manager or use default columns
@@ -453,49 +569,23 @@ class AppLogic(QObject):
 
     @Slot(str, int)
     def connect_serial(self, port, baud_rate):
-        """Connect to serial, UDP, or BLE output and immediately send AUTH."""
-        if baud_rate == -1:
-            result = self.serial_device.connect(port, transport='udp')
-        elif baud_rate == -2:
-            result = self.serial_device.connect(port, transport='ble')
-        else:
-            result = self.serial_device.connect(port, baud_rate, transport='serial')
-        if not result:
-            self.serial_auth_status_changed.emit("Not Sent")
-            return
-
+        """Queue a serial, UDP, or BLE connection and AUTH operation."""
         try:
             auth_frame = self.build_auth_packet()
         except ValueError as exc:
             self.serial_auth_status_changed.emit("Config Error")
-            self.serial_device.disconnect(
-                message=f"Connection failed: {exc}",
-                emit_signal=True
-            )
+            self.serial_connection_changed.emit(False, f"Connection failed: {exc}")
             return
 
-        if not self.serial_device.send_data(auth_frame, count_frame=False):
-            self.serial_auth_status_changed.emit("Send Failed")
-            if self.serial_device.is_connected():
-                self.serial_device.disconnect(
-                    message="Connection failed: AUTH send failed",
-                    emit_signal=True
-                )
-            return
-
-        self.serial_auth_status_changed.emit("Sent")
-        if baud_rate == -1:
-            self.serial_device.mark_connected(f"Connected to {self.serial_device.get_udp_endpoint_label()} via UDP")
-        elif baud_rate == -2:
-            self.serial_device.mark_connected(f"Connected to {self.serial_device.get_ble_endpoint_label()} via BLE")
-        else:
-            self.serial_device.mark_connected(f"Connected to {port} @ {baud_rate}bps")
+        self.serial_auth_status_changed.emit("Not Sent")
+        self.serial_connection_busy_changed.emit(True)
+        self._device_connect_requested.emit(port, baud_rate, auth_frame)
 
     @Slot()
     def disconnect_serial(self):
-        """Disconnect from serial device."""
-        self.serial_device.disconnect()
-        self.serial_auth_status_changed.emit("Not Sent")
+        """Queue a non-blocking device disconnect."""
+        self.serial_connection_busy_changed.emit(True)
+        self._device_disconnect_requested.emit()
 
     @Slot(int)
     def set_serial_offset(self, offset_ms):
@@ -506,6 +596,14 @@ class AppLogic(QObject):
     def set_udp_stream_repeats(self, repeats):
         """Set UDP STREAM repeat count."""
         self.serial_device.set_udp_stream_repeats(repeats)
+
+    @Slot(bool, int)
+    def set_global_brightness(self, enabled, percent):
+        """Configure non-destructive brightness modulation for device output."""
+        percent = max(GLOBAL_BRIGHTNESS_MIN, min(GLOBAL_BRIGHTNESS_MAX, int(percent)))
+        self.global_brightness_enabled = bool(enabled)
+        self.global_brightness_percent = percent
+        self._device_tracking_reset_requested.emit()
 
     @Slot(str)
     def set_serial_auth_lic(self, lic_text):
@@ -530,7 +628,12 @@ class AppLogic(QObject):
 
     def build_serial_packet(self, frame):
         """Build a STREAM (0xD8) TLV frame from timeline data."""
-        return build_stream_frame(frame)
+        brightness_percent = (
+            self.global_brightness_percent
+            if self.global_brightness_enabled
+            else GLOBAL_BRIGHTNESS_DEFAULT
+        )
+        return build_stream_frame(frame, brightness_percent)
 
     def build_auth_packet(self, host_time=None):
         """Build an AUTH (0xE0) TLV frame from the current LIC string."""
@@ -546,13 +649,13 @@ class AppLogic(QObject):
         """Called when video playback position changes. Sends frames to connected devices."""
         # Delegate to worker thread for non-blocking device output
         if timeline_type == 'source':
-            self.device_worker.send_to_devices(position_ms, self.source_data_manager)
+            self._device_frame_requested.emit(position_ms, self.source_data_manager)
         else:
-            self.device_worker.send_to_devices(position_ms, self.data_manager)
+            self._device_frame_requested.emit(position_ms, self.data_manager)
 
     def reset_device_tracking(self):
         """Reset frame tracking for new playback session."""
-        self.serial_device.reset_frame_tracking()
+        self._device_tracking_reset_requested.emit()
 
     def shutdown(self):
         """Cleanup threads properly"""

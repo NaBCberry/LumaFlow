@@ -6,8 +6,6 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
 ICON_PATH = BASE_DIR / "resources" / "icons" / "icon.png"
 RESOURCES_DIR = BASE_DIR / "resources"
-
-
 a = Analysis(
     [str(BASE_DIR / "main.py")],
     pathex=[str(BASE_DIR)],

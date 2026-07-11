@@ -345,6 +345,219 @@ class UpdateMarkerCommand(UndoCommand):
             self.manager.main_df.loc[self.frame_index, 'marker'] = self.original_marker if self.original_marker else ""
 
 
+class SetFunctionInRegionCommand(UndoCommand):
+    """Set all channel function values for existing frames in a closed interval."""
+
+    FUNCTION_COLUMNS = [f'ch{i}_function' for i in range(10)]
+
+    def __init__(self, manager, start_ms, end_ms, function):
+        super().__init__(manager, f"设置选区灯光功能: {function}")
+        self.start_ms = float(start_ms)
+        self.end_ms = float(end_ms)
+        self.function = int(function)
+        self.frame_times = None
+        self.original_values = None
+        self.affected_count = 0
+
+    def _validate(self):
+        if self.manager.main_df.empty:
+            raise ValueError("编辑工作区中没有数据帧。")
+        if self.start_ms >= self.end_ms:
+            raise ValueError("请先选择一个有效时间区域。")
+        if not 0 <= self.function <= 3:
+            raise ValueError("灯光功能必须在 0 到 3 之间。")
+
+        missing_columns = [
+            column for column in self.FUNCTION_COLUMNS
+            if column not in self.manager.main_df.columns
+        ]
+        if missing_columns:
+            raise ValueError(f"缺少灯光功能字段: {', '.join(missing_columns)}")
+
+    def _selection_mask(self):
+        frame_times = self.manager.main_df['frame_time_ms']
+        if self.frame_times is None:
+            return (frame_times >= self.start_ms) & (frame_times <= self.end_ms)
+        return frame_times.isin(self.frame_times)
+
+    def execute(self):
+        self._validate()
+        mask = self._selection_mask()
+        if not mask.any():
+            raise ValueError("选区内没有数据帧。")
+
+        if self.original_values is None:
+            selected = self.manager.main_df.loc[
+                mask,
+                ['frame_time_ms', *self.FUNCTION_COLUMNS],
+            ].copy()
+            self.frame_times = selected['frame_time_ms'].tolist()
+            self.original_values = selected.set_index('frame_time_ms')
+            self.affected_count = len(selected)
+
+        self.manager.main_df.loc[mask, self.FUNCTION_COLUMNS] = self.function
+
+    def undo(self):
+        if self.original_values is None or not self.frame_times:
+            return
+
+        mask = self._selection_mask()
+        current_times = self.manager.main_df.loc[mask, 'frame_time_ms']
+        restored = self.original_values.reindex(current_times)[self.FUNCTION_COLUMNS]
+        if restored.isna().any().any():
+            raise ValueError("无法恢复选区灯光功能：数据帧时间已变化。")
+        self.manager.main_df.loc[mask, self.FUNCTION_COLUMNS] = restored.to_numpy()
+
+
+class AdjustBrightnessInRegionCommand(UndoCommand):
+    """Scale all channel RGB values for existing frames in a closed interval."""
+
+    RGB_COLUMNS = [
+        f'ch{channel}_{color}'
+        for channel in range(10)
+        for color in ('red', 'green', 'blue')
+    ]
+
+    def __init__(self, manager, start_ms, end_ms, percent):
+        super().__init__(manager, f"调整选区亮度: {percent}%")
+        self.start_ms = float(start_ms)
+        self.end_ms = float(end_ms)
+        self.percent = int(percent)
+        self.frame_times = None
+        self.original_values = None
+        self.affected_count = 0
+
+    def _validate(self):
+        if self.manager.main_df.empty:
+            raise ValueError("编辑工作区中没有数据帧。")
+        if self.start_ms >= self.end_ms:
+            raise ValueError("请先选择一个有效时间区域。")
+        if not 0 <= self.percent <= 200:
+            raise ValueError("亮度比例必须在 0% 到 200% 之间。")
+
+        missing_columns = [
+            column for column in self.RGB_COLUMNS
+            if column not in self.manager.main_df.columns
+        ]
+        if missing_columns:
+            raise ValueError(f"缺少 RGB 字段: {', '.join(missing_columns)}")
+
+    def _selection_mask(self):
+        frame_times = self.manager.main_df['frame_time_ms']
+        if self.frame_times is None:
+            return (frame_times >= self.start_ms) & (frame_times <= self.end_ms)
+        return frame_times.isin(self.frame_times)
+
+    def execute(self):
+        self._validate()
+        mask = self._selection_mask()
+        if not mask.any():
+            raise ValueError("选区内没有数据帧。")
+
+        if self.original_values is None:
+            selected = self.manager.main_df.loc[
+                mask,
+                ['frame_time_ms', *self.RGB_COLUMNS],
+            ].copy()
+            self.frame_times = selected['frame_time_ms'].tolist()
+            self.original_values = selected.set_index('frame_time_ms')
+            self.affected_count = len(selected)
+
+        current_times = self.manager.main_df.loc[mask, 'frame_time_ms']
+        original = self.original_values.reindex(current_times)[self.RGB_COLUMNS]
+        if original.isna().any().any():
+            raise ValueError("无法调整选区亮度：数据帧时间已变化。")
+
+        scaled = (original.astype(float) * (self.percent / 100.0) + 0.5)
+        scaled = scaled.astype(int).clip(lower=0, upper=15)
+        self.manager.main_df.loc[mask, self.RGB_COLUMNS] = scaled.to_numpy()
+
+    def undo(self):
+        if self.original_values is None or not self.frame_times:
+            return
+
+        mask = self._selection_mask()
+        current_times = self.manager.main_df.loc[mask, 'frame_time_ms']
+        restored = self.original_values.reindex(current_times)[self.RGB_COLUMNS]
+        if restored.isna().any().any():
+            raise ValueError("无法恢复选区亮度：数据帧时间已变化。")
+        self.manager.main_df.loc[mask, self.RGB_COLUMNS] = restored.to_numpy()
+
+
+class SetColorInRegionCommand(UndoCommand):
+    """Set all channel RGB values for existing frames in a closed interval."""
+
+    RGB_COLUMNS = AdjustBrightnessInRegionCommand.RGB_COLUMNS
+
+    def __init__(self, manager, start_ms, end_ms, color):
+        super().__init__(manager, f"设置选区颜色: {color}")
+        self.start_ms = float(start_ms)
+        self.end_ms = float(end_ms)
+        self.color = {
+            component: int(color[component])
+            for component in ('r', 'g', 'b')
+        }
+        self.frame_times = None
+        self.original_values = None
+        self.affected_count = 0
+
+    def _validate(self):
+        if self.manager.main_df.empty:
+            raise ValueError("编辑工作区中没有数据帧。")
+        if self.start_ms >= self.end_ms:
+            raise ValueError("请先选择一个有效时间区域。")
+        if any(value < 0 or value > 15 for value in self.color.values()):
+            raise ValueError("RGB 分量必须在 0 到 15 之间。")
+
+        missing_columns = [
+            column for column in self.RGB_COLUMNS
+            if column not in self.manager.main_df.columns
+        ]
+        if missing_columns:
+            raise ValueError(f"缺少 RGB 字段: {', '.join(missing_columns)}")
+
+    def _selection_mask(self):
+        frame_times = self.manager.main_df['frame_time_ms']
+        if self.frame_times is None:
+            return (frame_times >= self.start_ms) & (frame_times <= self.end_ms)
+        return frame_times.isin(self.frame_times)
+
+    def execute(self):
+        self._validate()
+        mask = self._selection_mask()
+        if not mask.any():
+            raise ValueError("选区内没有数据帧。")
+
+        if self.original_values is None:
+            selected = self.manager.main_df.loc[
+                mask,
+                ['frame_time_ms', *self.RGB_COLUMNS],
+            ].copy()
+            self.frame_times = selected['frame_time_ms'].tolist()
+            self.original_values = selected.set_index('frame_time_ms')
+            self.affected_count = len(selected)
+
+        rgb = [self.color['r'], self.color['g'], self.color['b']]
+        for channel in range(10):
+            columns = [
+                f'ch{channel}_red',
+                f'ch{channel}_green',
+                f'ch{channel}_blue',
+            ]
+            self.manager.main_df.loc[mask, columns] = rgb
+
+    def undo(self):
+        if self.original_values is None or not self.frame_times:
+            return
+
+        mask = self._selection_mask()
+        current_times = self.manager.main_df.loc[mask, 'frame_time_ms']
+        restored = self.original_values.reindex(current_times)[self.RGB_COLUMNS]
+        if restored.isna().any().any():
+            raise ValueError("无法恢复选区颜色：数据帧时间已变化。")
+        self.manager.main_df.loc[mask, self.RGB_COLUMNS] = restored.to_numpy()
+
+
 class UpdateFrameCommand(UndoCommand):
     """
     Per PRD 5.1: Update an existing frame's color and function values.
