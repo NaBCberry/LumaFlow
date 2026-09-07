@@ -1,18 +1,34 @@
-# LumaFlow
-本项目（LumaFlow）是一个纯粹的技术研究项目，专注于灯光控制数据的可视化算法与编辑器逻辑开发。
+<p align="center">
+  <img src="resources/icons/icon.png" width="88" height="88" alt="LumaFlow icon">
+</p>
 
-当前版本：**1.8.0**。Windows 便携包文件名包含版本与平台，例如 `LumaFlow_v1.8.0_Windows_x64_Portable.zip`。
+<h1 align="center">LumaFlow</h1>
 
-1. **研究属性**：本项目旨在探索灯光效果的编排以及。
-2. **数据来源说明**：仓库内提供的 .csv 示例文件仅作为算法验证样本学习使用。这些样本通过特定的信号捕获实验获得，仅用于展示软件的数据渲染能力。
-3. **非商用承诺**：本项目及相关样本数据**严禁用于任何商业目的**，也不代表任何实际商业演出的完整技术方案。
-4. **版权保护**：样本数据中涉及的任何原创编排设计归原权利人所有。若权利人认为相关样本的使用不当，请联系移除测试样本。
+<p align="center">LED 灯光序列编排工具，让颜色、节拍与时间轴同步。</p>
+<p align="center">A desktop timeline editor for LED light sequences.</p>
 
-*This project is for academic and educational purposes only. The provided CSV samples are for algorithm verification and visualization testing. No commercial use is intended or permitted.*
+<p align="center">
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.9.0-16803c" alt="Version 1.9.0"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3-blue" alt="Code license: GPLv3"></a>
+  <img src="https://img.shields.io/badge/platform-Windows-0078D4" alt="Windows">
+  <a href="https://github.com/ltyridium/LumaFlow/actions/workflows/ci.yml"><img src="https://github.com/ltyridium/LumaFlow/actions/workflows/ci.yml/badge.svg" alt="Tests"></a>
+</p>
 
-**Note on Data**: The code in this repository is licensed under [GPL], but the .csv sample files are provided only for testing and are not covered by this license.
+<p align="center">
+  <a href="#安装指南">安装</a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="CHANGELOG.md">更新日志</a> ·
+  <a href="CONTRIBUTING.md">参与贡献</a> ·
+  <a href="https://github.com/ltyridium/LumaFlow/issues">问题反馈</a>
+</p>
 
+![LumaFlow 编辑器界面：通道时间轴、参考音频与设备输出面板](docs/images/editor-overview.png)
 
+双工作区编排、可选通道显示、参考音视频同步，以及串口 / BLE / UDP 设备输出。上图使用程序生成的演示灯光数据，设备未连接。
+
+当前源码版本为 **1.9.0**。便携包请查看 [GitHub Releases](https://github.com/ltyridium/LumaFlow/releases)，源码更新与二进制包发布相互独立。
+
+---
 
 ## 目录
 
@@ -28,6 +44,8 @@
 - [音频可视化](#音频可视化)
 - [设备输出](#设备输出)
 - [版本说明](#版本说明)
+- [开发与验证](#开发与验证)
+- [许可与样本数据](#许可与样本数据)
 - [架构设计](#架构设计)
 
 ---
@@ -36,8 +54,8 @@
 
 LumaFlow 是一款专为 LED 灯光效果设计的时间轴编辑器。它支持：
 
-- **10通道 LED 控制**：每个通道具有独立的 RGB 颜色（4位，0-15）和功能模式
-- **视频同步**：通过 VLC 播放器实现视频与灯光时间轴的精确同步
+- **10通道数据编辑**：每个通道具有独立的 RGB 颜色（4位，0-15）和功能模式；当前设备仅 CH0 有效，时间轴默认只显示 CH0
+- **参考媒体同步**：支持视频及 MP3、WAV、FLAC、M4A 等音频文件与灯光时间轴同步
 - **音频波形显示**：可视化音频频谱，辅助灯光节拍同步
 - **双工作区系统**：素材工作区（只读参考）+ 编辑工作区（灯光序列编排）
 - **完整的撤销/重做系统**：所有编辑操作均可撤销
@@ -64,11 +82,12 @@ LumaFlow 是一款专为 LED 灯光效果设计的时间轴编辑器。它支持
 - 标记系统（可双击编辑）
 - 常亮、1Hz、2Hz、4Hz 使用不同纹理显示，缩放聚合后仍保留闪烁特征
 
-### 视频与音频
-- 双视频预览窗口（源预览 + 编辑预览）
+### 参考媒体与音频
+- 双参考媒体播放器（素材参考 + 编辑参考）
 - VLC 播放器集成
+- 支持常见视频格式以及 MP3、WAV、FLAC、M4A、AAC、OGG、Opus 等音频格式
 - 音频频谱可视化（Mel 频谱图）
-- 视频与时间轴同步播放
+- 参考媒体与时间轴同步播放
 - 视频播放结束后保留最终画面，并支持继续播放或拖动跳转
 - 音频解析完成后保持当前时间轴视图，不打断编辑位置
 
@@ -76,7 +95,7 @@ LumaFlow 是一款专为 LED 灯光效果设计的时间轴编辑器。它支持
 - 可停靠面板系统（参考 Adobe Premiere Pro 布局）
 - 深色/浅色主题切换
 - 窗口状态保存与恢复
-- 可恢复上次关闭时打开的灯光序列和参考视频
+- 可恢复上次关闭时打开的灯光序列和参考媒体
 - 数据表格查看器
 
 ---
@@ -86,7 +105,7 @@ LumaFlow 是一款专为 LED 灯光效果设计的时间轴编辑器。它支持
 ### 必需组件
 - Python 3.10+
 - VLC Media Player（系统安装）
-- FFmpeg（用于音频提取，可选但推荐）
+- FFmpeg（启动检查必需，用于参考媒体音频提取；须加入 PATH）
 - Windows 10/11 64 位（Windows 便携包）
 
 ### Python 依赖
@@ -114,13 +133,16 @@ psutil>=7.0.0
 ### 1. 安装 VLC Media Player
 从 [VLC 官网](https://www.videolan.org/vlc/) 下载并安装 VLC。
 
-### 2. 安装 Python 依赖
+### 2. 安装 FFmpeg
+安装 FFmpeg 并将其 `bin` 目录加入 PATH。重新打开终端后，确认 `ffmpeg -version` 可执行。
+
+### 3. 安装 Python 依赖
 ```bash
 cd LumaFlow
 python -m pip install -r requirements.txt
 ```
 
-### 3. 运行应用程序
+### 4. 运行应用程序
 ```bash
 python main.py
 ```
@@ -140,7 +162,7 @@ python main.py
 
 ### 导入参考素材
 1. 点击 **文件 → 打开灯光序列到素材工作区...** 加载只读参考 CSV
-2. 点击 **打开参考视频到素材工作区...** 或 **打开参考视频到编辑工作区...**
+2. 点击 **打开参考媒体到素材工作区...** 或 **打开参考媒体到编辑工作区...**，选择视频或音频文件
 
 ### 基本编辑流程
 1. 在时间轴上点击定位播放头
@@ -161,11 +183,11 @@ python main.py
 │  工具栏  │ 新建 打开 保存 │ 撤销 重做 │ 剪切 复制 粘贴 │ ...   │
 ├──────────────────┬──────────────────────────────────────────────┤
 │                  │                                              │
-│  素材参考视频    │                   素材工作区                   │
+│  素材参考媒体    │                   素材工作区                   │
 │                  │                                              │
 ├──────────────────┼──────────────────────────────────────────────┤
 │                  │                                              │
-│  编辑参考视频    │                   编辑工作区                   │
+│  编辑参考媒体    │                   编辑工作区                   │
 │                  │                                              │
 ├──────────────────┴──────────────────────────────────────────────┤
 │                        数据表格视图                              │
@@ -174,16 +196,21 @@ python main.py
 
 ### 时间轴视图
 
-- **CH0-CH9**：10个 LED 通道，显示颜色块
+- **CH0-CH9**：10个 LED 通道，显示颜色块；默认仅显示 CH0
 - **MARK**：标记通道，显示时间标记
 - **IDX**：索引通道，显示播放头和选区指示器
+
+可在 **视图 → 显示通道...** 打开紧凑的多选窗口，一次勾选多个通道，也可使用“全选”或“仅 CH0”。通道选择会同时作用于素材和编辑时间轴，并在下次启动时恢复；至少保留一个可见通道。隐藏操作不会修改 CSV 数据或设备输出。
+
+当前设备仅 CH0 有效；CH1-CH9 保留用于数据查看和编辑，显示这些通道不代表设备支持输出。
+
 - **红色竖线**：播放头位置
 - **蓝色区域**：选中区域
 
 ### 可停靠面板
 - **素材工作区**：只读灯光素材时间轴（默认隐藏）
-- **素材参考视频**：素材工作区对应的视频预览（默认隐藏）
-- **编辑参考视频**：编辑工作区对应的视频预览
+- **素材参考媒体**：素材工作区对应的媒体播放器（默认隐藏）
+- **编辑参考媒体**：编辑工作区对应的媒体播放器
 - **数据表**：选区数据表格视图
 
 通过 **视图** 菜单可以显示/隐藏各个面板。
@@ -281,7 +308,7 @@ python main.py
 ### 播放控制
 | 快捷键 | 功能 |
 |--------|------|
-| `空格` | 播放/暂停当前焦点时间轴对应的视频 |
+| `空格` | 播放/暂停当前焦点时间轴对应的参考媒体 |
 | `F11` | 视频窗口全屏切换（视频预览控件聚焦时） |
 | `Esc` | 退出视频全屏 |
 
@@ -295,8 +322,8 @@ python main.py
 | 中键拖动 | 平移视图 |
 | 右键点击 | 上下文菜单 |
 | 双击标记 | 编辑标记名称 |
-| 视频区域单击 | 播放/暂停视频 |
-| 视频区域双击 | 全屏切换 |
+| 媒体区域单击 | 播放/暂停参考媒体 |
+| 视频区域双击 | 全屏切换（纯音频不适用） |
 
 ---
 
@@ -366,13 +393,15 @@ LumaFlow 使用 CSV 格式存储灯光序列数据：
 
 ### 概述
 
-LumaFlow 可以从视频中提取音频并显示 Mel 频谱图，帮助您将灯光效果与音乐节拍同步。
+LumaFlow 可以直接读取音频文件，或从视频中提取音频并显示 Mel 频谱图，帮助您将灯光效果与音乐节拍同步。
 
 ### 启用音频可视化
 
-1. 导入视频文件
-2. 音频将自动提取和处理
+1. 导入视频或音频参考媒体
+2. 音频将自动读取或从视频中提取并处理
 3. 频谱图显示在时间轴下方
+
+纯音频文件会隐藏视频画面和全屏按钮，保留播放、暂停、定位、音量及时间轴同步。素材和编辑工作区可以同时使用同一媒体文件。具体格式能否解码取决于本机 VLC 和 FFmpeg，不包含受 DRM 保护的媒体。
 
 ### 音频设置
 
@@ -414,6 +443,15 @@ LumaFlow 可以从视频中提取音频并显示 Mel 频谱图，帮助您将灯
 
 ## 版本说明
 
+### 1.9.0
+
+- 参考素材导入扩展为常见视频与音频媒体，支持 MP3、WAV、FLAC、M4A、AAC、OGG、Opus 等格式。
+- 时间轴默认聚焦 CH0，并支持通过独立多选窗口同时显示任意 CH0-CH9 通道。
+- 压缩 MARK 和 IDX 辅助轨道，将更多垂直空间用于颜色通道。
+- 修复纯数字 marker 列无法写入文本标记的问题，并过滤旧文件中的 `0`、`null` 等空标记占位值。
+- 修复聚合渲染尾帧未延伸至下一真实关键帧的问题。
+- 修复同一参考媒体用于两个工作区时频谱仅更新一侧的问题，以及全屏视频切换为音频后残留全屏窗口和旧定时回调的问题。
+
 ### 1.8.0
 
 - 增强 BLE、UDP 和串口连接稳定性，完善认证、断开重连和 UDP 重复发送。
@@ -424,6 +462,24 @@ LumaFlow 可以从视频中提取音频并显示 Mel 频谱图，帮助您将灯
 - 便携包文件名统一包含版本和平台，并打包 BLE 运行依赖。
 
 完整变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+
+---
+
+## 开发与验证
+
+在项目根目录运行完整测试（PowerShell）：
+
+```powershell
+$env:QT_QPA_PLATFORM = "offscreen"
+python -m unittest discover -s tests -p "*test*.py"
+Remove-Item Env:QT_QPA_PLATFORM
+```
+
+测试同时包含 `*_test.py` 和 `test_*.py` 两种命名，不能仅使用其中一种模式。v1.9.0 在 2026-09-08 通过全部 152 项测试，并使用真实 MP3/MP4 验证 FFmpeg 解码和 Mel 频谱计算。VLC 加载、定位、播放及全屏媒体切换另在 Qt `minimal` 后端下完成静音检查；`offscreen` 用于单元测试和截图，不作为原生播放器验收环境。
+
+上述检查不代替灯光设备实机联调或 Windows 便携包验收；源码版本更新不代表已上传新的安装包。
+
+GitHub Actions 在 Windows 上运行 Python 3.10 / 3.12 测试，徽章显示实际执行状态。开发环境、贡献流程和打包步骤见 [CONTRIBUTING.md](CONTRIBUTING.md)，漏洞报告见 [SECURITY.md](SECURITY.md)。
 
 ---
 
@@ -496,7 +552,7 @@ LumaFlow 采用 MVC 风格的架构：
 - EffectDialog：光效参数配置
 - ColorPickerDialog：颜色选择器
 
-#### `ui/video_player_widget.py` - 视频播放器
+#### `ui/video_player_widget.py` - 参考媒体播放器
 - VLC 播放器封装
 - 播放控制
 - 时间同步
@@ -527,3 +583,13 @@ LumaFlow 支持深色和浅色两种主题：
 
 
 ## 问题反馈
+
+通过 [GitHub Issues](https://github.com/ltyridium/LumaFlow/issues) 提交问题，并附上版本、复现步骤和必要截图。请不要上传私人媒体、访问凭据或无权分发的样本。
+
+## 许可与样本数据
+
+**应用代码**采用 [GNU GPLv3](LICENSE) 许可；代码的使用、修改和分发以该许可证为准，不附加“禁止商用”限制。
+
+**参考样本**（`resources/CSVfile/` 下的 CSV 文件）仅用于技术研究、学习和数据渲染验证，不在应用代码的 GPLv3 许可范围内，也不代表任何实际商业演出的完整技术方案。样本数据不得用于商业用途，其中涉及的原创编排设计归原权利人所有；如权利人认为使用不当，请联系维护者移除。
+
+Code is licensed under GPLv3. Reference CSV samples are provided for non-commercial research and testing only and are not covered by the code license.

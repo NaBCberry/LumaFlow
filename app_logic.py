@@ -4,7 +4,7 @@ from PySide6.QtCore import QObject, Signal, Slot, QThread
 import pandas as pd
 
 from core.data_manager import DataManager
-from core.undo_manager import AdjustBrightnessInRegionCommand, SetColorInRegionCommand, UndoManager, CutCommand, CopyCommand, PasteCommand, DeleteCommand, InsertEffectCommand, AddMarkerCommand, InsertFrameCommand, OffsetCommand, SetFunctionInRegionCommand, UpdateFrameCommand
+from core.undo_manager import AdjustBrightnessInRegionCommand, SetColorInRegionCommand, UndoManager, CutCommand, CopyCommand, PasteCommand, DeleteCommand, InsertEffectCommand, AddMarkerCommand, UpdateMarkerCommand, InsertFrameCommand, OffsetCommand, SetFunctionInRegionCommand, UpdateFrameCommand
 from core.clipboard_manager import ClipboardManager
 from core.effects import EffectGenerator
 from core.audio_manager import AudioManager
@@ -327,7 +327,7 @@ class AppLogic(QObject):
 
     @Slot(float, str)
     def update_marker(self, at_ms, name):
-        command = AddMarkerCommand(self.data_manager, at_ms, name)
+        command = UpdateMarkerCommand(self.data_manager, at_ms, name)
         self._execute_command(command)
 
     @Slot(float)
@@ -498,11 +498,13 @@ class AppLogic(QObject):
     # --- Audio Methods ---
     @Slot(str, str)
     def load_video_audio(self, video_path: str, timeline_type: str):
-        """Extract and process audio from video file"""
+        """Extract and process audio from a reference media file."""
         if timeline_type == 'source':
             self.current_source_video_path = video_path
+            self.source_audio_duration_ms = None
         else:
             self.current_edit_video_path = video_path
+            self.edit_audio_duration_ms = None
 
         self.audio_manager.extract_audio(video_path, 'mono')
         self.status_message_changed.emit(
@@ -525,7 +527,7 @@ class AppLogic(QObject):
             self.status_message_changed.emit(
                 tr("status.source_audio_loaded", sample_rate=audio_data.sample_rate, duration=duration_sec)
             )
-        elif video_path == self.current_edit_video_path:
+        if video_path == self.current_edit_video_path:
             self.edit_audio_processed.emit(audio_data)
             self.edit_audio_duration_ms = audio_data.duration_ms
             duration_sec = audio_data.duration_ms / 1000.0
@@ -536,18 +538,32 @@ class AppLogic(QObject):
     @Slot(str, str)
     def _on_audio_failed(self, video_path: str, error: str):
         """Handle audio processing errors"""
-        timeline_type = 'source' if video_path == self.current_source_video_path else 'edit'
-        self.audio_processing_failed.emit(timeline_type, error)
-        self.status_message_changed.emit(tr("status.audio_processing_failed", error=error))
+        matched = False
+        for timeline_type, current_path in (
+            ('source', self.current_source_video_path),
+            ('edit', self.current_edit_video_path),
+        ):
+            if video_path == current_path:
+                self.audio_processing_failed.emit(timeline_type, error)
+                matched = True
+        if matched:
+            self.status_message_changed.emit(tr("status.audio_processing_failed", error=error))
 
     @Slot(str, str, int)
     def _on_audio_progress(self, video_path: str, stage: str, percentage: int):
         """Route audio processing progress to correct timeline"""
-        timeline_type = 'source' if video_path == self.current_source_video_path else 'edit'
-        self.audio_progress.emit(timeline_type, stage, percentage)
-        self.status_message_changed.emit(
-            tr("status.audio_processing_progress", stage=stage, percentage=percentage)
-        )
+        matched = False
+        for timeline_type, current_path in (
+            ('source', self.current_source_video_path),
+            ('edit', self.current_edit_video_path),
+        ):
+            if video_path == current_path:
+                self.audio_progress.emit(timeline_type, stage, percentage)
+                matched = True
+        if matched:
+            self.status_message_changed.emit(
+                tr("status.audio_processing_progress", stage=stage, percentage=percentage)
+            )
 
     # --- Device Output Methods ---
 

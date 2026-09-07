@@ -1,9 +1,10 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QSlider
 
+from core.media_formats import is_audio_file
 from ui.video_player_widget import VideoPlayerWidget
 
 
@@ -113,6 +114,7 @@ def build_player(*, length=5000, time_ms=0, playing=False):
     player._media_restart_generation = 0
     player._pending_media_reload = None
     player._emit_media_loaded_on_ready = False
+    player._is_audio_only = False
     player._attach_video_to_frame = lambda: True
     player._current_video_path = "demo.mp4"
     player.current_time_ms = time_ms
@@ -128,6 +130,75 @@ def build_player(*, length=5000, time_ms=0, playing=False):
 
 
 class VideoPlayerWidgetTests(unittest.TestCase):
+    def test_vlc_time_callback_only_emits_a_qt_signal(self):
+        player = SimpleNamespace(_vlc_time_changed_signal=Mock())
+        VideoPlayerWidget._on_vlc_time_changed(player, SimpleNamespace(u=SimpleNamespace(new_time=1250)))
+        player._vlc_time_changed_signal.emit.assert_called_once_with(1250)
+
+    def test_vlc_error_callback_only_emits_a_qt_signal(self):
+        player = SimpleNamespace(_vlc_error_signal=Mock())
+        VideoPlayerWidget._on_vlc_error(player)
+        player._vlc_error_signal.emit.assert_called_once_with()
+
+    def test_vlc_time_updates_require_loaded_paused_media(self):
+        player = build_player()
+        player._update_position_widgets = Mock()
+        player._handle_vlc_time_changed(1200)
+        player._update_position_widgets.assert_called_once_with(1200)
+        player._update_position_widgets.reset_mock()
+        player._is_playing = True
+        player._handle_vlc_time_changed(1300)
+        player._is_playing = False
+        player._is_media_loaded = False
+        player._handle_vlc_time_changed(1400)
+        player._update_position_widgets.assert_not_called()
+
+    def test_loading_audio_exits_fullscreen_and_cancels_old_callbacks(self):
+        player = build_player()
+        player._is_fullscreen = True
+        player.exit_fullscreen = Mock()
+        player._single_click_timer = Mock()
+        old_timer = Mock()
+        player._media_load_timer = old_timer
+        player.video_frame = Mock()
+        player.fullscreen_button = Mock()
+        player.file_label = Mock()
+        player.media_player.get_media = Mock(return_value=None)
+        player.instance.media_new = Mock(return_value=Mock())
+        with patch('ui.video_player_widget.QTimer'):
+            player.load_media('reference.MP3')
+        player.exit_fullscreen.assert_called_once()
+        player._single_click_timer.stop.assert_called_once()
+        old_timer.stop.assert_called_once()
+        old_timer.deleteLater.assert_called_once()
+        player.video_frame.setVisible.assert_called_once_with(False)
+        player.fullscreen_button.setVisible.assert_called_once_with(False)
+        self.assertTrue(player._is_audio_only)
+        self.assertEqual(1, player._video_output_generation)
+        self.assertEqual(1, player.master_clock_timer.stop_calls)
+
+    def test_audio_ignores_pending_paused_video_refresh(self):
+        player = build_player()
+        callbacks = []
+        with patch('ui.video_player_widget.QTimer.singleShot',
+                   side_effect=lambda delay, callback: callbacks.append(callback)):
+            player._refresh_paused_video_frame(2500, 0)
+        player._is_audio_only = True
+        callbacks[0]()
+        self.assertEqual([], player.media_player.set_time_calls)
+
+    def test_common_audio_extensions_are_detected(self):
+        self.assertTrue(is_audio_file("reference.MP3"))
+        self.assertTrue(is_audio_file("reference.flac"))
+        self.assertFalse(is_audio_file("reference.mp4"))
+
+    def test_legacy_video_loader_delegates_to_media_loader(self):
+        player = build_player()
+        with patch.object(player, "load_media") as load_media:
+            player.load_video("reference.mp3")
+
+        load_media.assert_called_once_with("reference.mp3")
+
     def test_apply_loaded_media_state_updates_time_label_and_percentage(self):
         player = build_player(length=3_723_004, time_ms=0)
 
@@ -218,6 +289,15 @@ class VideoPlayerWidgetTests(unittest.TestCase):
         self.assertEqual([0, 80, 250], [delay for delay, _callback in scheduled])
         self.assertEqual(1, player._video_output_generation)
 
+    def test_audio_only_media_skips_video_output_restore(self):
+        player = build_player()
+        player._is_audio_only = True
+
+        with patch("ui.video_player_widget.QTimer.singleShot") as single_shot:
+            player.set_output_visible(True)
+
+        single_shot.assert_not_called()
+
     def test_end_reloads_media_and_keeps_final_frame_visible(self):
         player = build_player(length=5000, time_ms=5000, playing=True)
 
@@ -232,6 +312,18 @@ class VideoPlayerWidgetTests(unittest.TestCase):
         self.assertEqual([4900], player.media_player.set_time_calls)
         self.assertEqual(5000, player.current_time_ms)
         self.assertEqual([True], player.playback_stopped_events)
+
+    def test_audio_end_stays_seekable_without_reloading_a_final_frame(self):
+        player = build_player(length=5000, time_ms=5000, playing=True)
+        player._is_audio_only = True
+
+        with patch.object(player, "_reload_media_at") as reload_media:
+            player._handle_vlc_end_reached()
+
+        reload_media.assert_not_called()
+        self.assertTrue(player._has_reached_end)
+        self.assertFalse(player._restoring_end_frame)
+        self.assertEqual(5000, player.current_time_ms)
 
     def test_seek_after_end_reloads_at_requested_position(self):
         player = build_player(length=5000, time_ms=5000)

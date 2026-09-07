@@ -11,8 +11,9 @@ from PySide6.QtWidgets import (
 
 # Assuming these are in the correct project structure
 from .timeline_group_widget import TimelineGroupWidget
+from .timeline_widget import CHANNEL_COUNT, DEFAULT_VISIBLE_CHANNELS
 from .widgets import DataTableWidget
-from .dialogs import EffectDialog, ColorPickerDialog
+from .dialogs import ChannelVisibilityDialog, EffectDialog, ColorPickerDialog
 from .audio_controls_widget import AudioControlsWidget
 from .audio_settings_dialog import AudioSettingsDialog
 from .video_player_widget import VideoPlayerWidget
@@ -50,6 +51,7 @@ LAST_WORKSPACE_SETTING_KEYS = {
     "edit_video": "workspace/last/edit_video",
     "source_video": "workspace/last/source_video",
 }
+VISIBLE_CHANNELS_SETTING_KEY = "view/visible_channels"
 
 
 class BLEScanWorker(QObject):
@@ -113,6 +115,7 @@ class MainWindow(QMainWindow):
         self.syncing_timeline_to_edit_video = False
         self.ble_scan_thread = None
         self.ble_scan_worker = None
+        self.visible_channels = self._load_visible_channels()
 
         self.create_actions()
         self.init_ui() # init_ui now depends on actions for context menus
@@ -157,6 +160,7 @@ class MainWindow(QMainWindow):
         # Convenience aliases
         self.source_timeline = self.source_timeline_group.timeline
         self.source_audio_track = self.source_timeline_group.audio_track
+        self._apply_visible_channels(self.visible_channels, persist=False)
 
         # --- Bottom Dock: Data Table ---
         self.data_table_dock = QDockWidget(tr("dock.data_table"), self)
@@ -165,7 +169,7 @@ class MainWindow(QMainWindow):
         self.data_table_dock.setWidget(self.data_table)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.data_table_dock)
 
-        # --- Left Top Dock: Source Preview (Video) ---
+        # --- Left Top Dock: Source Media Preview ---
         self.source_preview_dock = QDockWidget(tr("dock.source_preview"), self)
         self.source_preview_dock.setObjectName("SourcePreviewDock")
         self.source_preview_widget = VideoPlayerWidget()
@@ -173,7 +177,7 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.LeftDockWidgetArea, self.source_preview_dock)
         self.source_preview_dock.hide()  # 默认隐藏 source 预览
 
-        # --- Left Bottom Dock: Program Preview (Video) ---
+        # --- Left Bottom Dock: Program Media Preview ---
         self.edit_preview_dock = QDockWidget(tr("dock.program_preview"), self)
         self.edit_preview_dock.setObjectName("ProgramPreviewDock")
         self.edit_preview_widget = VideoPlayerWidget()
@@ -317,6 +321,10 @@ class MainWindow(QMainWindow):
         self.calibration_action = QAction(tr("action.rgb_calibration"), self)
         self.fit_view_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon), tr("action.fit_selection"), self)
         self.fit_view_action.setShortcut("F")
+        self.channel_visibility_action = QAction(
+            f"{tr('menu.visible_channels')}...",
+            self,
+        )
 
         self.add_marker_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay), tr("action.add_marker"), self)
         self.add_marker_action.setShortcut("M")
@@ -460,6 +468,7 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         view_menu.addAction(self.calibration_action)
         view_menu.addAction(self.fit_view_action)
+        view_menu.addAction(self.channel_visibility_action)
         view_menu.addSeparator()
 
         language_menu = view_menu.addMenu(tr("menu.language"))
@@ -534,6 +543,9 @@ class MainWindow(QMainWindow):
         self.light_theme_action.triggered.connect(lambda: self.set_theme("light_theme"))
         self.calibration_action.triggered.connect(self.on_open_calibration)
         self.fit_view_action.triggered.connect(self.on_fit_to_view)
+        self.channel_visibility_action.triggered.connect(
+            self.on_show_channel_visibility_dialog
+        )
 
         self.add_marker_action.triggered.connect(self.on_add_marker)
         self.insert_blackout_action.triggered.connect(lambda: self.insert_blackout_requested.emit(self.edit_timeline.get_playback_head_time()))
@@ -714,7 +726,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "open_last_workspace_action"):
             self.open_last_workspace_action.setEnabled(any(paths.values()))
 
-    def _load_workspace_video(self, file_path, timeline_type, announce=True):
+    def _load_workspace_media(self, file_path, timeline_type, announce=True):
         if timeline_type == "source":
             preview_widget = self.source_preview_widget
             status_key = "status.source_video_loaded"
@@ -722,13 +734,20 @@ class MainWindow(QMainWindow):
             preview_widget = self.edit_preview_widget
             status_key = "status.edit_video_loaded"
 
-        preview_widget.load_video(file_path)
+        media_loader = getattr(preview_widget, "load_media", None)
+        if media_loader is None:
+            media_loader = preview_widget.load_video
+        media_loader(file_path)
         self.logic.load_video_audio(file_path, timeline_type)
         if announce:
             self.set_status_message(
                 tr(status_key, name=os.path.basename(file_path))
             )
         return True
+
+    def _load_workspace_video(self, file_path, timeline_type, announce=True):
+        """Backward-compatible alias for the former video-only loader."""
+        return self._load_workspace_media(file_path, timeline_type, announce)
 
     @Slot()
     def on_open_last_workspace(self):
@@ -1148,20 +1167,20 @@ class MainWindow(QMainWindow):
             self,
             tr("main.import_source_video"),
             "",
-            tr("main.file_filter_video")
+            tr("main.file_filter_media")
         )
         if file_path:
-            self._load_workspace_video(file_path, "source")
+            self._load_workspace_media(file_path, "source")
 
     def on_import_edit_video(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             tr("main.import_edit_video"),
             "",
-            tr("main.file_filter_video")
+            tr("main.file_filter_media")
         )
         if file_path:
-            self._load_workspace_video(file_path, "edit")
+            self._load_workspace_media(file_path, "edit")
 
     def on_toggle_sync_playback(self):
         # This would contain the logic to sync playback between timelines and video
@@ -1440,6 +1459,57 @@ class MainWindow(QMainWindow):
             self._update_function_action_icons(theme_name)
         except FileNotFoundError:
             self.set_status_message(tr("status.stylesheet_not_found", name=theme_name))
+
+    @staticmethod
+    def _normalize_visible_channels(value):
+        if value is None:
+            return DEFAULT_VISIBLE_CHANNELS
+        if isinstance(value, str):
+            stripped = value.strip().strip("[]")
+            values = [] if not stripped else stripped.split(",")
+        elif isinstance(value, (list, tuple, set)):
+            values = value
+        else:
+            values = [value]
+
+        try:
+            channels = tuple(sorted({int(item) for item in values}))
+        except (TypeError, ValueError):
+            return DEFAULT_VISIBLE_CHANNELS
+        if not channels or any(channel < 0 or channel >= CHANNEL_COUNT for channel in channels):
+            return DEFAULT_VISIBLE_CHANNELS
+        return channels
+
+    def _load_visible_channels(self):
+        settings = QSettings("LumaFlow", "LumaFlow")
+        stored = settings.value(
+            VISIBLE_CHANNELS_SETTING_KEY,
+            list(DEFAULT_VISIBLE_CHANNELS),
+        )
+        return self._normalize_visible_channels(stored)
+
+    def _apply_visible_channels(self, channels, persist=True):
+        normalized = self._normalize_visible_channels(channels)
+        self.visible_channels = normalized
+
+        if hasattr(self, "edit_timeline"):
+            self.edit_timeline.set_visible_channels(normalized)
+        if hasattr(self, "source_timeline"):
+            self.source_timeline.set_visible_channels(normalized)
+        if persist:
+            QSettings("LumaFlow", "LumaFlow").setValue(
+                VISIBLE_CHANNELS_SETTING_KEY,
+                list(normalized),
+            )
+
+    def on_show_channel_visibility_dialog(self):
+        dialog = ChannelVisibilityDialog(
+            self.visible_channels,
+            CHANNEL_COUNT,
+            self,
+        )
+        if dialog.exec():
+            self._apply_visible_channels(dialog.selected_channels())
 
     def closeEvent(self, event):
         # Save window geometry and state per PRD 2.3

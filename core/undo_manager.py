@@ -294,6 +294,7 @@ class AddMarkerCommand(UndoCommand):
     def execute(self):
         if self.manager.main_df.empty:
             raise ValueError("时间轴为空，无法添加标记。")
+        self.manager.ensure_marker_column()
             
         # 如果未提供标记名称，提示用户输入
         if not self.marker_name:
@@ -309,12 +310,15 @@ class AddMarkerCommand(UndoCommand):
         self.original_marker = self.manager.main_df.loc[closest_index, 'marker']
         
         # 添加新标记
-        self.manager.main_df.loc[closest_index, 'marker'] = self.marker_name
+        self.manager.set_marker_at_index(closest_index, self.marker_name)
 
     def undo(self):
         if self.frame_index is not None:
             # 恢复原始标记
-            self.manager.main_df.loc[self.frame_index, 'marker'] = self.original_marker if self.original_marker else ""
+            self.manager.set_marker_at_index(
+                self.frame_index,
+                self.original_marker if self.original_marker else "",
+            )
 
 class UpdateMarkerCommand(UndoCommand):
     """更新标记的命令"""
@@ -328,6 +332,7 @@ class UpdateMarkerCommand(UndoCommand):
     def execute(self):
         if self.manager.main_df.empty:
             raise ValueError("时间轴为空，无法更新标记。")
+        self.manager.ensure_marker_column()
 
         # 找到最接近的帧
         closest_index = self.manager.main_df.iloc[(self.manager.main_df['frame_time_ms'] - self.at_ms).abs().argsort()[:1]].index[0]
@@ -337,12 +342,15 @@ class UpdateMarkerCommand(UndoCommand):
         self.original_marker = self.manager.main_df.loc[closest_index, 'marker']
 
         # 更新标记
-        self.manager.main_df.loc[closest_index, 'marker'] = self.marker_name
+        self.manager.set_marker_at_index(closest_index, self.marker_name)
 
     def undo(self):
         if self.frame_index is not None:
             # 恢复原始标记
-            self.manager.main_df.loc[self.frame_index, 'marker'] = self.original_marker if self.original_marker else ""
+            self.manager.set_marker_at_index(
+                self.frame_index,
+                self.original_marker if self.original_marker else "",
+            )
 
 
 class SetFunctionInRegionCommand(UndoCommand):
@@ -575,6 +583,7 @@ class UpdateFrameCommand(UndoCommand):
     def execute(self):
         if self.manager.main_df.empty:
             raise ValueError("时间轴为空，无法编辑帧。")
+        self.manager.ensure_marker_column()
 
         # Find the exact frame at this time
         mask = self.manager.main_df['frame_time_ms'] == self.frame_time_ms
@@ -607,7 +616,7 @@ class UpdateFrameCommand(UndoCommand):
             self.manager.main_df.loc[self.frame_index, f'ch{i}_blue'] = self.new_color['b']
 
         if self.new_marker is not None:
-            self.manager.main_df.loc[self.frame_index, 'marker'] = self.new_marker
+            self.manager.set_marker_at_index(self.frame_index, self.new_marker)
 
     def undo(self):
         if self.frame_index is None or self.original_values is None:
@@ -615,4 +624,7 @@ class UpdateFrameCommand(UndoCommand):
 
         # Restore original values
         for key, value in self.original_values.items():
-            self.manager.main_df.loc[self.frame_index, key] = value
+            if key == 'marker':
+                self.manager.set_marker_at_index(self.frame_index, value)
+            else:
+                self.manager.main_df.loc[self.frame_index, key] = value

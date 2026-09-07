@@ -48,7 +48,7 @@ class AudioProcessingWorker(QObject):
         Extract audio from video and compute mel-spectrogram
 
         Args:
-            video_path: Path to video file
+            video_path: Path to a video or audio file
             channel_mode: 'mono', 'stereo', 'left', 'right'
             params: Processing parameters (n_fft, hop_length, etc.)
         """
@@ -57,7 +57,7 @@ class AudioProcessingWorker(QObject):
             return
 
         if not os.path.exists(video_path):
-            self.error.emit(video_path, f"Video file not found: {video_path}")
+            self.error.emit(video_path, f"Media file not found: {video_path}")
             return
 
         try:

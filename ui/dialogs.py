@@ -2,7 +2,7 @@ from PySide6.QtWidgets import (
     QDialog, QGridLayout, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QPushButton, QSpinBox, QDoubleSpinBox, QLineEdit,
     QColorDialog, QDialogButtonBox, QGroupBox, QComboBox, QTextBrowser,
-    QWidget, QSlider, QListWidget, QListWidgetItem
+    QWidget, QSlider, QListWidget, QListWidgetItem, QCheckBox
 )
 from PySide6.QtGui import QColor, QPixmap, QPainter, QPen, QBrush, QPainterPath, QIcon
 from PySide6.QtCore import Qt, Signal
@@ -14,6 +14,83 @@ import vlc
 from core.metadata import APP_METADATA
 from core.i18n import tr
 from core.resource_paths import icon_path
+
+
+class ChannelVisibilityDialog(QDialog):
+    """Compact multi-select dialog for timeline channel visibility."""
+
+    def __init__(self, selected_channels, channel_count=10, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(tr("dialog.visible_channels.title"))
+        self.setModal(True)
+
+        selected = {int(channel) for channel in selected_channels}
+        main_layout = QVBoxLayout(self)
+        main_layout.setSpacing(10)
+
+        description = QLabel(tr("dialog.visible_channels.description"))
+        main_layout.addWidget(description)
+
+        channels_layout = QGridLayout()
+        channels_layout.setHorizontalSpacing(24)
+        channels_layout.setVerticalSpacing(8)
+        self.channel_checkboxes = []
+        for channel in range(int(channel_count)):
+            checkbox = QCheckBox(f"CH{channel}")
+            checkbox.setChecked(channel in selected)
+            checkbox.toggled.connect(self._update_ok_enabled)
+            channels_layout.addWidget(checkbox, channel // 2, channel % 2)
+            self.channel_checkboxes.append(checkbox)
+        main_layout.addLayout(channels_layout)
+
+        quick_layout = QHBoxLayout()
+        select_all_button = QPushButton(tr("dialog.visible_channels.select_all"))
+        only_ch0_button = QPushButton(tr("dialog.visible_channels.only_ch0"))
+        select_all_button.clicked.connect(self.select_all)
+        only_ch0_button.clicked.connect(self.select_only_ch0)
+        quick_layout.addWidget(select_all_button)
+        quick_layout.addWidget(only_ch0_button)
+        main_layout.addLayout(quick_layout)
+
+        self.button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.button_box.button(QDialogButtonBox.StandardButton.Ok).setText(
+            tr("dialog.visible_channels.apply")
+        )
+        self.button_box.button(QDialogButtonBox.StandardButton.Cancel).setText(
+            tr("dialog.visible_channels.cancel")
+        )
+        self.ok_button = self.button_box.button(
+            QDialogButtonBox.StandardButton.Ok
+        )
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        main_layout.addWidget(self.button_box)
+
+        self._update_ok_enabled()
+        self.adjustSize()
+        self.setFixedSize(self.sizeHint())
+
+    def selected_channels(self):
+        return tuple(
+            channel
+            for channel, checkbox in enumerate(self.channel_checkboxes)
+            if checkbox.isChecked()
+        )
+
+    def select_all(self):
+        for checkbox in self.channel_checkboxes:
+            checkbox.setChecked(True)
+
+    def select_only_ch0(self):
+        for channel, checkbox in enumerate(self.channel_checkboxes):
+            checkbox.setChecked(channel == 0)
+
+    def _update_ok_enabled(self):
+        self.ok_button.setEnabled(bool(self.selected_channels()))
+
 
 class EffectDialog(QDialog):
     """A general-purpose dialog for configuring lighting effects."""

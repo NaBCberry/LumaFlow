@@ -20,6 +20,7 @@ from core.i18n import tr
 
 # Local imports
 from core.color_calibration import color_calibration
+from core.data_manager import normalize_marker_series
 from core.timeline_bounds import clamp_visible_range
 from utils.performance import perf_monitor
 from ui.timeline_rendering import (
@@ -32,6 +33,14 @@ from ui.timeline_rendering import (
 from ui.timeline_theme import get_visual_theme_profile
 from ui.timeline_tools import ToolManager
 from ui.function_visuals import make_function_brush, make_function_icon
+
+
+CHANNEL_COUNT = 10
+ALL_CHANNELS = tuple(range(CHANNEL_COUNT))
+DEFAULT_VISIBLE_CHANNELS = (0,)
+CHANNEL_TRACK_HEIGHT = 1.0
+# MARK / IDX each occupy 1 / 12 of the viewport; channel rows share the rest.
+AUXILIARY_TRACK_SCALE = 0.1
 
 
 def _as_qcolor(value):
@@ -54,8 +63,17 @@ class RenderWorker(QObject):
         self.current_data = pd.DataFrame()
         self.is_running = False
 
-    @pyqtSlot(pd.DataFrame, tuple, float, int, int)
-    def process_data(self, df, view_range, view_width_pixels, num_channels=10, generation=0):
+    @pyqtSlot(pd.DataFrame, tuple, float, object, int)
+    def process_data(
+        self,
+        df,
+        view_range,
+        view_width_pixels,
+        visible_channels=None,
+        generation=0,
+        *,
+        num_channels=None,
+    ):
         """
         接收数据并开始处理的核心槽函数 (V4 - 同时修正颜色保持和颜色延伸)。
         """
@@ -66,6 +84,17 @@ class RenderWorker(QObject):
         
         try:
             x_min, x_max = view_range
+            if num_channels is not None:
+                if visible_channels is not None:
+                    raise TypeError(
+                        "Use either visible_channels or num_channels, not both."
+                    )
+                visible_channels = tuple(range(int(num_channels)))
+            elif visible_channels is None:
+                visible_channels = ALL_CHANNELS
+            elif isinstance(visible_channels, (int, np.integer)):
+                visible_channels = tuple(range(int(visible_channels)))
+            visible_channels = tuple(int(channel) for channel in visible_channels)
             
             if df.empty:
                 self.finished.emit({}, QRectF(), False, view_range, generation)
@@ -79,12 +108,10 @@ class RenderWorker(QObject):
             if start_idx < 0:
                 start_idx = 0
             
-            # 找到视图右侧的第一个关键帧 (用于颜色延伸)
-            # 我们需要多找一个点来正确计算最后一个可见块的宽度
-            end_idx = times.searchsorted(x_max, side='right') + 1
-            # 确保 end_idx 不会超出范围
-            if end_idx > len(times):
-                end_idx = len(times)
+            # 只聚合视区内的关键帧。视区外的下一真实帧由完整 times
+            # 单独参与尾宽计算，不能混入聚合，否则会替换最后一个可见颜色。
+            end_idx = times.searchsorted(x_max, side='right')
+            end_idx = max(start_idx + 1, min(end_idx, len(times)))
 
             # --- 2. 高效切片 ---
             df_visible = df.iloc[start_idx:end_idx].copy()
@@ -108,7 +135,12 @@ class RenderWorker(QObject):
 
             if num_bins > 0:
                 # --- MODIFIED: 接收聚合函数返回的两个值 ---
-                df_final, is_raw_data = self._aggregate_data(df_visible, num_bins, df)
+                df_final, is_raw_data = self._aggregate_data(
+                    df_visible,
+                    num_bins,
+                    df,
+                    visible_channels,
+                )
             else:
                 df_final, is_raw_data = pd.DataFrame(), False
 
@@ -153,34 +185,40 @@ class RenderWorker(QObject):
             )
 
             n_frames_final = len(df_final)
-            n_points = n_frames_final * num_channels
+            num_visible_channels = len(visible_channels)
+            n_points = n_frames_final * num_visible_channels
             
             render_data = {
-                'x': np.repeat(df_final['frame_time_ms'].values, num_channels),
-                'y': np.tile(np.arange(num_channels), n_frames_final),
-                'w': np.repeat(df_final['width'].values, num_channels),
+                'x': np.repeat(df_final['frame_time_ms'].values, num_visible_channels),
+                'y': np.tile(np.arange(num_visible_channels), n_frames_final),
+                'w': np.repeat(df_final['width'].values, num_visible_channels),
                 'r': np.zeros(n_points, dtype=np.uint8),
                 'g': np.zeros(n_points, dtype=np.uint8),
                 'b': np.zeros(n_points, dtype=np.uint8),
                 'function': np.zeros(n_points, dtype=np.uint8),
             }
             
-            for i in range(num_channels):
-                indices = np.arange(i, n_points, num_channels)
+            for display_row, channel in enumerate(visible_channels):
+                indices = np.arange(display_row, n_points, num_visible_channels)
 
                 # Apply per-channel LUT lookup based on calibration
-                raw_r = df_final[f'ch{i}_red'].values.astype(int)
-                raw_g = df_final[f'ch{i}_green'].values.astype(int)
-                raw_b = df_final[f'ch{i}_blue'].values.astype(int)
-                raw_func = df_final[f'ch{i}_function'].values.astype(int)
+                raw_r = df_final[f'ch{channel}_red'].values.astype(int)
+                raw_g = df_final[f'ch{channel}_green'].values.astype(int)
+                raw_b = df_final[f'ch{channel}_blue'].values.astype(int)
+                raw_func = df_final[f'ch{channel}_function'].values.astype(int)
 
                 render_data['r'][indices] = color_calibration.r_lut[raw_r]
                 render_data['g'][indices] = color_calibration.g_lut[raw_g]
                 render_data['b'][indices] = color_calibration.b_lut[raw_b]
                 render_data['function'][indices] = raw_func
 
-            brect = QRectF(df_final['frame_time_ms'].min(), -0.5, 
-                        (df_final['frame_time_ms'] + df_final['width']).max() - df_final['frame_time_ms'].min(), 10)
+            brect = QRectF(
+                df_final['frame_time_ms'].min(),
+                -0.5,
+                (df_final['frame_time_ms'] + df_final['width']).max()
+                - df_final['frame_time_ms'].min(),
+                num_visible_channels,
+            )
             
             # --- MODIFIED: 在发射信号时，传递 is_raw_data 标志 ---
             self.finished.emit(render_data, brect, is_raw_data, view_range, generation)
@@ -199,7 +237,13 @@ class RenderWorker(QObject):
             return max(0.0, next_keyframe_time - float(display_start_time))
         return max(0.0, float(view_end_time) - float(display_start_time))
 
-    def _aggregate_data(self, df, num_bins, full_df):
+    def _aggregate_data(
+        self,
+        df,
+        num_bins,
+        full_df,
+        visible_channels=ALL_CHANNELS,
+    ):
         """
         数据聚合 V6.1 - 修正了所有返回路径，确保返回 (DataFrame, bool) 元组。
         """
@@ -232,7 +276,10 @@ class RenderWorker(QObject):
 
         # --- 2. 核心聚合逻辑 ---
         df = df.copy()
-        df['importance_score'] = self._calculate_frame_importance_vectorized(df)
+        df['importance_score'] = self._calculate_frame_importance_vectorized(
+            df,
+            visible_channels,
+        )
         
         min_time, max_time = df['frame_time_ms'].min(), df['frame_time_ms'].max()
         if max_time <= min_time:
@@ -281,7 +328,11 @@ class RenderWorker(QObject):
         # --- FIX: 确保返回元组 ---
         return df_agg, False
 
-    def _calculate_frame_importance_vectorized(self, df):
+    def _calculate_frame_importance_vectorized(
+        self,
+        df,
+        visible_channels=ALL_CHANNELS,
+    ):
         """
         计算每帧重要性评分的向量化版本 - 性能极高。
         """
@@ -292,7 +343,11 @@ class RenderWorker(QObject):
         scores = pd.Series(0, index=df.index, dtype=np.float32)
         
         # --- 1. 黑帧检测 (最高优先级) ---
-        rgb_cols = [f'ch{i}_{c}' for i in range(10) for c in ['red', 'green', 'blue']]
+        rgb_cols = [
+            f'ch{channel}_{color}'
+            for channel in visible_channels
+            for color in ['red', 'green', 'blue']
+        ]
         total_brightness = df[rgb_cols].sum(axis=1)
         
         is_blackout = total_brightness == 0
@@ -320,8 +375,10 @@ class RenderWorker(QObject):
         total_color_distance_prev = pd.Series(0, index=df.index, dtype=np.float32)
         total_color_distance_next = pd.Series(0, index=df.index, dtype=np.float32)
 
-        for i in range(10):
-            r_col, g_col, b_col = f'ch{i}_red', f'ch{i}_green', f'ch{i}_blue'
+        for channel in visible_channels:
+            r_col = f'ch{channel}_red'
+            g_col = f'ch{channel}_green'
+            b_col = f'ch{channel}_blue'
             
             # 与前一帧的差异
             dr_p = df[r_col] - df[r_col].shift(1)
@@ -350,8 +407,8 @@ class RenderWorker(QObject):
 
         # --- 5. Function 模式与切换检测 (高优先级) ---
         function_cols = [
-            f'ch{i}_function' for i in range(10)
-            if f'ch{i}_function' in df.columns
+            f'ch{channel}_function' for channel in visible_channels
+            if f'ch{channel}_function' in df.columns
         ]
         if function_cols:
             function_values = df[function_cols].fillna(0).astype(np.int16)
@@ -559,25 +616,53 @@ class IDXIndicatorsItem(pg.GraphicsObject):
         self.region_start = None
         self.region_end = None
         self.frame_positions = None # 新增：存储数据帧位置
-        self._bounding_rect = QRectF(0.0, -1.5, 1.0, 1.0)
+        self.track_y = -1.0
+        self.track_height = 1.0
+        self._bounding_rect = QRectF(
+            0.0,
+            self.track_y - self.track_height / 2,
+            1.0,
+            self.track_height,
+        )
         
         self.playback_brush = pg.mkBrush(255, 0, 0)
         self.region_brush = pg.mkBrush(0, 0, 255, 150)
         self.frame_brush = pg.mkBrush(50, 50, 50) # 新增：用于数据帧的深灰色笔刷
         self.no_pen = pg.mkPen(None)
 
+    def setTrackGeometry(self, center_y, height):
+        center_y = float(center_y)
+        height = float(height)
+        if height <= 0:
+            raise ValueError("IDX track height must be positive.")
+        if center_y == self.track_y and height == self.track_height:
+            return
+
+        self.track_y = center_y
+        self.track_height = height
+        new_rect = QRectF(
+            self._bounding_rect.left(),
+            self.track_y - self.track_height / 2,
+            self._bounding_rect.width(),
+            self.track_height,
+        )
+        self.prepareGeometryChange()
+        self._bounding_rect = new_rect
+        self.update()
+
     def setTimelineBounds(self, start_ms, end_ms):
+        top = self.track_y - self.track_height / 2
         if start_ms is None or end_ms is None:
-            new_rect = QRectF(0.0, -1.5, 1.0, 1.0)
+            new_rect = QRectF(0.0, top, 1.0, self.track_height)
         else:
             start = float(start_ms)
             end = float(end_ms)
             if not np.isfinite(start) or not np.isfinite(end) or end <= start:
-                new_rect = QRectF(0.0, -1.5, 1.0, 1.0)
+                new_rect = QRectF(0.0, top, 1.0, self.track_height)
             else:
                 left = min(0.0, start) - self.HORIZONTAL_PAD_MS
                 right = end + self.HORIZONTAL_PAD_MS
-                new_rect = QRectF(left, -1.5, right - left, 1.0)
+                new_rect = QRectF(left, top, right - left, self.track_height)
 
         if new_rect != self._bounding_rect:
             self.prepareGeometryChange()
@@ -617,7 +702,7 @@ class IDXIndicatorsItem(pg.GraphicsObject):
             # --- 1. 绘制播放头指示器 (红色三角形) ---
             if self.playback_head_pos is not None:
                 painter.setBrush(self.playback_brush)
-                pixel_pos = transform.map(QPointF(self.playback_head_pos, -1.0))
+                pixel_pos = transform.map(QPointF(self.playback_head_pos, self.track_y))
                 pixel_triangle = QPolygonF([
                     pixel_pos,
                     pixel_pos + QPointF(-5, -8),
@@ -629,7 +714,7 @@ class IDXIndicatorsItem(pg.GraphicsObject):
             if self.region_start is not None and self.region_end is not None:
                 painter.setBrush(self.region_brush)
 
-                start_pixel_pos = transform.map(QPointF(self.region_start, -1.0))
+                start_pixel_pos = transform.map(QPointF(self.region_start, self.track_y))
                 start_flag = QPolygonF([
                     start_pixel_pos,
                     start_pixel_pos + QPointF(0, -8),
@@ -638,7 +723,7 @@ class IDXIndicatorsItem(pg.GraphicsObject):
                 ])
                 painter.drawPolygon(transform.inverted()[0].map(start_flag))
 
-                end_pixel_pos = transform.map(QPointF(self.region_end, -1.0))
+                end_pixel_pos = transform.map(QPointF(self.region_end, self.track_y))
                 end_flag = QPolygonF([
                     end_pixel_pos,
                     end_pixel_pos + QPointF(0, -8),
@@ -652,7 +737,7 @@ class IDXIndicatorsItem(pg.GraphicsObject):
                 painter.setBrush(self.frame_brush)
                 for x_pos in self.frame_positions:
                     # 将菱形的中心点（逻辑坐标）映射到像素坐标
-                    pixel_pos = transform.map(QPointF(x_pos, -1.0))
+                    pixel_pos = transform.map(QPointF(x_pos, self.track_y))
                     # 在像素坐标系中定义一个小菱形的形状
                     pixel_diamond = QPolygonF([
                         pixel_pos + QPointF(0, -3),  # 顶点
@@ -679,12 +764,20 @@ class MarkerItem(pg.GraphicsObject):
     一个自定义的、类似 Adobe Premiere Pro 的标记图形项。
     它包含一个"房子"形状的头部、文本标签和一条垂直延伸线。
     """
-    def __init__(self, pos, text, color=QColor(60, 180, 75), timeline_widget=None):
+    def __init__(
+        self,
+        pos,
+        text,
+        color=QColor(60, 180, 75),
+        timeline_widget=None,
+        marker_y=10.0,
+    ):
         super().__init__()
         
         self.marker_text = text
         self.marker_color = color
         self.timeline_widget = timeline_widget  # 添加对时间轴组件的引用
+        self.marker_y = float(marker_y)
         
         # 定义头部尺寸（单位：像素）
         self.head_width = 14
@@ -695,8 +788,7 @@ class MarkerItem(pg.GraphicsObject):
         self.fill_brush = pg.mkBrush(color)
         self.outline_pen = pg.mkPen(color='k', width=1)
 
-        # 将标记的"基座"放在MARK通道的中心线上 (y=10)
-        self.setPos(pos, 10)
+        self.setPos(pos, self.marker_y)
         
         # 启用鼠标事件
         self.setAcceptHoverEvents(True)
@@ -709,8 +801,7 @@ class MarkerItem(pg.GraphicsObject):
 
             # --- 1. 绘制从基座向下延伸的垂直线 (在数据坐标系中) ---
             painter.setPen(self.line_pen)
-            # 从本地坐标(0,0)即y=10，向下绘制到y=0 (CH0中心)
-            painter.drawLine(QPointF(0, 0), QPointF(0, -10))
+            painter.drawLine(QPointF(0, 0), QPointF(0, -self.marker_y))
 
             # --- 2. 采用像素坐标系绘制大小固定的、尖顶朝下的标记头 ---
             transform = self.deviceTransform()
@@ -746,9 +837,7 @@ class MarkerItem(pg.GraphicsObject):
             painter.restore()
 
     def boundingRect(self):
-        # 修正：垂直线从 0 向下延伸到 -10，头部在 0 附近
-        # X轴给点宽度(-1, 1)，Y轴必须覆盖整个绘制范围 [-10.5, 1.5]
-        return QRectF(-1, -1, 2, 12)
+        return QRectF(-1, -self.marker_y - 0.5, 2, self.marker_y + 2.0)
 
     def mouseDoubleClickEvent(self, event):
         """处理双击事件，定位到标记位置并弹出对话框让用户编辑标记文本"""
@@ -782,7 +871,7 @@ class TimelineWidget(pg.PlotWidget):
     # --- SIGNALS ---
     region_selected = Signal(float, float)
     playback_head_changed = Signal(float)
-    render_request = Signal(pd.DataFrame, tuple, float, int, int)
+    render_request = Signal(pd.DataFrame, tuple, float, object, int)
     offset_requested = Signal(float, float, float)
     # Signals for keyboard shortcuts
     insert_blackout_requested = Signal(float)
@@ -804,12 +893,11 @@ class TimelineWidget(pg.PlotWidget):
 
     # --- CONSTANTS ---
     MARKER_TEXT_VISIBILITY_THRESHOLD = 0.0005
-    TIMELINE_Y_RANGE = (-1.5, 10.5)  # 修改：优化显示效果
-
     def __init__(self, parent=None, timeline_type='edit'):
         self.axis = TimeAxisItem(orientation='bottom')
         super().__init__(parent=parent, axisItems={'bottom': self.axis})
         self.timeline_type = timeline_type # 'source' 或 'edit'
+        self.visible_channels = DEFAULT_VISIBLE_CHANNELS
         self.plot_item = self.getPlotItem()
         
         # --- Basic Setup ---
@@ -823,10 +911,7 @@ class TimelineWidget(pg.PlotWidget):
         # y_axis.setLabel('通道')
         y_axis.setWidth(70)
         y_axis.setStyle(autoExpandTextSpace=False)
-        new_ticks = [[(i, f"CH{i}") for i in range(10)]]
-        new_ticks[0].extend([(10, "MARK"), (-1, "IDX")])
-        y_axis.setTicks(new_ticks)
-        self.plot_item.setYRange(*self.TIMELINE_Y_RANGE, padding=0)
+        self._update_channel_axis_layout()
         self.plot_item.layout.setContentsMargins(0, 0, 0, 0)
         
         # [修改] 彻底禁用 X 和 Y 轴的自动缩放
@@ -845,6 +930,10 @@ class TimelineWidget(pg.PlotWidget):
         self.region_item = pg.LinearRegionItem(orientation='vertical', brush=pg.mkBrush(0, 0, 255, 40))
         self.scatter_item = FastScatterItem()
         self.idx_indicators_item = IDXIndicatorsItem()
+        self.idx_indicators_item.setTrackGeometry(
+            self._idx_track_y(),
+            self._auxiliary_track_height(),
+        )
         self.ghost_region_item = pg.LinearRegionItem(orientation='vertical', brush=pg.mkBrush(100, 100, 255, 70))
         self.ghost_region_item.setZValue(-2)
         self.ghost_region_item.hide()
@@ -912,6 +1001,70 @@ class TimelineWidget(pg.PlotWidget):
         # Initialize Tool Manager for mouse interaction
         self.tool_manager = ToolManager(self)
         self.apply_visual_theme("dark_theme")
+
+    def _auxiliary_track_height(self) -> float:
+        channels_height = len(self.visible_channels) * CHANNEL_TRACK_HEIGHT
+        return channels_height * AUXILIARY_TRACK_SCALE
+
+    def _marker_track_y(self) -> float:
+        channel_top = (
+            len(self.visible_channels) * CHANNEL_TRACK_HEIGHT
+            - CHANNEL_TRACK_HEIGHT / 2
+        )
+        return channel_top + self._auxiliary_track_height() / 2
+
+    def _idx_track_y(self) -> float:
+        channel_bottom = -CHANNEL_TRACK_HEIGHT / 2
+        return channel_bottom - self._auxiliary_track_height() / 2
+
+    def _timeline_y_range(self) -> tuple[float, float]:
+        channel_bottom = -CHANNEL_TRACK_HEIGHT / 2
+        channel_top = (
+            len(self.visible_channels) * CHANNEL_TRACK_HEIGHT
+            - CHANNEL_TRACK_HEIGHT / 2
+        )
+        auxiliary_height = self._auxiliary_track_height()
+        return (
+            channel_bottom - auxiliary_height,
+            channel_top + auxiliary_height,
+        )
+
+    def _update_channel_axis_layout(self):
+        marker_y = self._marker_track_y()
+        idx_y = self._idx_track_y()
+        ticks = [
+            (display_row, f"CH{channel}")
+            for display_row, channel in enumerate(self.visible_channels)
+        ]
+        ticks.extend([(marker_y, "MARK"), (idx_y, "IDX")])
+        self.y_axis.setTicks([ticks])
+        self.plot_item.setYRange(*self._timeline_y_range(), padding=0)
+        if hasattr(self, "idx_indicators_item"):
+            self.idx_indicators_item.setTrackGeometry(
+                idx_y,
+                self._auxiliary_track_height(),
+            )
+
+    def set_visible_channels(self, channels):
+        normalized = tuple(sorted({int(channel) for channel in channels}))
+        if not normalized:
+            raise ValueError("At least one timeline channel must remain visible.")
+        if any(channel < 0 or channel >= CHANNEL_COUNT for channel in normalized):
+            raise ValueError("Timeline channel indices must be between 0 and 9.")
+        if normalized == self.visible_channels:
+            return
+
+        self.visible_channels = normalized
+        self._update_channel_axis_layout()
+        self._invalidate_render_buffer()
+        self._scheduled_render_request = None
+        self._render_request_generation += 1
+        self.show_markers(self.current_data)
+
+        if self.current_data.empty:
+            self.scatter_item.clear()
+            return
+        self._schedule_render("visible_channels_changed", force=True)
 
     def _build_offset_label_stylesheet(self, profile: dict[str, object]) -> str:
         return (
@@ -1194,9 +1347,7 @@ class TimelineWidget(pg.PlotWidget):
 
     def _jump_to_prev_marker(self, current_time: float) -> float:
         """Per PRD 4.1: Jump to previous marker"""
-        if self.current_data.empty or 'marker' not in self.current_data.columns:
-            return current_time
-        markers = self.current_data[self.current_data['marker'].notna() & (self.current_data['marker'] != '')]
+        markers = self._marker_rows(self.current_data)
         if markers.empty:
             return current_time
         prev_markers = markers[markers['frame_time_ms'] < current_time - 1]
@@ -1206,9 +1357,7 @@ class TimelineWidget(pg.PlotWidget):
 
     def _jump_to_next_marker(self, current_time: float) -> float:
         """Per PRD 4.1: Jump to next marker"""
-        if self.current_data.empty or 'marker' not in self.current_data.columns:
-            return current_time
-        markers = self.current_data[self.current_data['marker'].notna() & (self.current_data['marker'] != '')]
+        markers = self._marker_rows(self.current_data)
         if markers.empty:
             return current_time
         next_markers = markers[markers['frame_time_ms'] > current_time + 1]
@@ -1255,7 +1404,7 @@ class TimelineWidget(pg.PlotWidget):
             text_item.setVisible(show_text)
             if show_text:
                 graphic_pos = marker_graphic.pos()
-                text_y_pos = 10
+                text_y_pos = self._marker_track_y()
                 pixel_pos = self.plot_item.vb.mapViewToDevice(graphic_pos)
                 pixel_pos.setX(pixel_pos.x() + marker_graphic.head_width / 2 + 5)
                 view_pos = self.plot_item.vb.mapDeviceToView(pixel_pos)
@@ -1363,7 +1512,7 @@ class TimelineWidget(pg.PlotWidget):
             self.current_data.copy(),
             request["render_range"],
             float(request["render_width_pixels"]),
-            10,
+            tuple(self.visible_channels),
             request["generation"],
         )
 
@@ -1398,18 +1547,36 @@ class TimelineWidget(pg.PlotWidget):
         self.idx_indicators_item.setPlaybackHead(self.playback_head.value())
         self.idx_indicators_item.setRegion(*self.region_item.getRegion())
 
+    @staticmethod
+    def _marker_rows(df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty or 'marker' not in df.columns:
+            return df.iloc[0:0]
+
+        marker_values = normalize_marker_series(df['marker'])
+        visible_mask = marker_values != ""
+        markers_df = df.loc[visible_mask].copy()
+        markers_df['marker'] = marker_values.loc[visible_mask].to_numpy(dtype=object)
+        return markers_df
+
     def show_markers(self, df: pd.DataFrame):
         for item in self.marker_items + self.marker_text_items:
             self.plot_item.removeItem(item)
         self.marker_items.clear()
         self.marker_text_items.clear()
-        if df.empty: return
-        markers_df = df[df['marker'].notna() & (df['marker'] != "")]
+        markers_df = self._marker_rows(df)
+        if markers_df.empty:
+            return
         colors = [QColor(60, 180, 75), QColor(255, 225, 25), QColor(0, 130, 200), QColor(245, 130, 48)]
         for i, (_, marker_row) in enumerate(markers_df.iterrows()):
             time_ms, text = marker_row['frame_time_ms'], marker_row['marker']
             color = colors[i % len(colors)]
-            marker_item = MarkerItem(pos=time_ms, text=text, color=color, timeline_widget=self)
+            marker_item = MarkerItem(
+                pos=time_ms,
+                text=text,
+                color=color,
+                timeline_widget=self,
+                marker_y=self._marker_track_y(),
+            )
             marker_item.setZValue(6)
             self.plot_item.addItem(marker_item)
             self.marker_items.append(marker_item)

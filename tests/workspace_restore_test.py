@@ -31,7 +31,7 @@ class PreviewStub:
     def __init__(self):
         self.loaded = []
 
-    def load_video(self, file_path):
+    def load_media(self, file_path):
         self.loaded.append(file_path)
 
 
@@ -63,6 +63,7 @@ class WorkspaceHarness:
     _get_last_workspace_paths = MainWindow._get_last_workspace_paths
     _has_last_workspace = MainWindow._has_last_workspace
     _save_last_workspace = MainWindow._save_last_workspace
+    _load_workspace_media = MainWindow._load_workspace_media
     _load_workspace_video = MainWindow._load_workspace_video
     on_open_last_workspace = MainWindow.on_open_last_workspace
 
@@ -128,6 +129,26 @@ class WorkspaceRestoreTests(unittest.TestCase):
             tr("status.last_workspace_restored", count=4),
             window.status_messages[-1],
         )
+
+    def test_audio_reference_is_loaded_through_media_player_and_audio_analysis(self):
+        window = WorkspaceHarness()
+
+        restored = window._load_workspace_media("reference.mp3", "source")
+
+        self.assertTrue(restored)
+        self.assertEqual(["reference.mp3"], window.source_preview_widget.loaded)
+        self.assertEqual([("reference.mp3", "source")], window.logic.loaded_audio)
+        self.assertEqual(
+            tr("status.source_video_loaded", name="reference.mp3"),
+            window.status_messages[-1],
+        )
+
+    def test_media_file_filter_includes_audio_and_video_formats(self):
+        media_filter = tr("main.file_filter_media")
+
+        self.assertIn("*.mp3", media_filter)
+        self.assertIn("*.flac", media_filter)
+        self.assertIn("*.mp4", media_filter)
 
     def test_restore_continues_when_resources_are_missing_or_invalid(self):
         paths = {

@@ -7,6 +7,7 @@ from urllib.parse import unquote
 from PySide6.QtCore import Qt, Signal, Slot, QTimer, QEvent
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QPushButton, QFrame, QStyle, QSizePolicy
 from core.i18n import tr
+from core.media_formats import is_audio_file
 from core.timecode import format_time_ms
 
 try:
@@ -44,7 +45,7 @@ class _FullScreenVideoWindow(QWidget):
 
 
 class VideoPlayerWidget(QWidget):
-    """A video player widget using the python-vlc library."""
+    """A media player widget using the python-vlc library."""
 
     position_changed_manually = Signal(int)
     position_changed_during_playback = Signal(int)
@@ -55,6 +56,8 @@ class VideoPlayerWidget(QWidget):
     _vlc_paused_signal = Signal()
     _vlc_playing_signal = Signal()
     _vlc_end_reached_signal = Signal()
+    _vlc_time_changed_signal = Signal(int)
+    _vlc_error_signal = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -73,6 +76,7 @@ class VideoPlayerWidget(QWidget):
         self._emit_media_loaded_on_ready = False
         self._single_click_delay_ms = 220
         self._current_video_path = None
+        self._is_audio_only = False
         self.total_duration_ms = 0
 
         # Master clock variables for smooth playback
@@ -130,7 +134,7 @@ class VideoPlayerWidget(QWidget):
         self.volume_slider.setValue(70)
         self.volume_slider.setToolTip(tr("video.volume_tooltip"))
 
-        self.file_label = QLabel(tr("video.no_video_loaded"))
+        self.file_label = QLabel(tr("video.no_media_loaded"))
         self.file_label.setWordWrap(True)
         self.file_label.setToolTip(tr("video.loaded", name=""))
 
@@ -159,6 +163,8 @@ class VideoPlayerWidget(QWidget):
         self._vlc_paused_signal.connect(self._handle_vlc_paused)
         self._vlc_playing_signal.connect(self._handle_vlc_playing)
         self._vlc_end_reached_signal.connect(self._handle_vlc_end_reached)
+        self._vlc_time_changed_signal.connect(self._handle_vlc_time_changed)
+        self._vlc_error_signal.connect(self._handle_vlc_error)
 
         # Connect VLC events
         events = self.media_player.event_manager()
@@ -190,17 +196,26 @@ class VideoPlayerWidget(QWidget):
         label.setStyleSheet("QLabel { color: red; font-weight: bold; }")
         layout.addWidget(label)
 
-    def load_video(self, file_path: str):
+    def load_media(self, file_path: str):
         if not vlc_available:
             return
 
         self._is_media_loaded = False
+        if self._is_fullscreen:
+            self.exit_fullscreen()
+        self._video_output_generation += 1
+        self.master_clock_timer.stop()
+        self._single_click_timer.stop()
+        if hasattr(self, '_media_load_timer'):
+            self._media_load_timer.stop()
+            self._media_load_timer.deleteLater()
         self._is_playing = False
         self._has_reached_end = False
         self._restoring_end_frame = False
         self._media_restart_generation += 1
         self._pending_media_reload = None
         self._emit_media_loaded_on_ready = True
+        self._is_audio_only = is_audio_file(file_path)
         self.current_time_ms = 0
         self.total_duration_ms = 0
         self.play_button.setEnabled(False)
@@ -217,8 +232,10 @@ class VideoPlayerWidget(QWidget):
 
         self._current_video_path = file_path
 
-        # Tell VLC where to draw the video
-        self._attach_video_to_frame()
+        self.video_frame.setVisible(not self._is_audio_only)
+        self.fullscreen_button.setVisible(not self._is_audio_only)
+        if not self._is_audio_only:
+            self._attach_video_to_frame()
 
         self.file_label.setText(tr("video.loading", name=os.path.basename(file_path)))
 
@@ -230,13 +247,19 @@ class VideoPlayerWidget(QWidget):
         self.media_player.pause()
 
         # Check media loading with a timer instead of singleShot for better reliability
-        self._media_load_timer = QTimer()
+        self._media_load_timer = QTimer(self)
         self._media_load_timer.timeout.connect(self._check_media_loaded)
         self._media_load_timer.setSingleShot(True)
         self._media_load_timer.start(500)
 
+    def load_video(self, file_path: str):
+        """Backward-compatible alias for callers using the old video-only API."""
+        self.load_media(file_path)
+
     def _attach_video_to_frame(self):
         """Attach VLC video output to video_frame."""
+        if self._is_audio_only:
+            return False
         handle = int(self.video_frame.winId())
         if handle <= 0:
             return False
@@ -285,7 +308,12 @@ class VideoPlayerWidget(QWidget):
             self._video_output_generation += 1
 
     def _schedule_video_output_restore(self):
-        if not vlc_available or not self._is_media_loaded or not self._video_output_visible:
+        if (
+            not vlc_available
+            or self._is_audio_only
+            or not self._is_media_loaded
+            or not self._video_output_visible
+        ):
             return
 
         self._video_output_generation += 1
@@ -318,7 +346,7 @@ class VideoPlayerWidget(QWidget):
 
     def _refresh_paused_video_frame(self, position_ms, generation):
         """Ask VLC to recreate its video output and render the paused frame."""
-        if self._is_playing:
+        if self._is_playing or self._is_audio_only:
             return
 
         safe_position = max(0, int(position_ms))
@@ -330,6 +358,7 @@ class VideoPlayerWidget(QWidget):
                 generation != self._video_output_generation
                 or not self._video_output_visible
                 or self._is_playing
+                or self._is_audio_only
             ):
                 return
             self._attach_video_to_frame()
@@ -375,6 +404,8 @@ class VideoPlayerWidget(QWidget):
         super().keyPressEvent(event)
 
     def toggle_fullscreen(self):
+        if self._is_audio_only:
+            return
         if self._is_fullscreen:
             self.exit_fullscreen()
         else:
@@ -564,10 +595,14 @@ class VideoPlayerWidget(QWidget):
         pass
 
     def _on_vlc_time_changed(self, event):
+        self._vlc_time_changed_signal.emit(event.u.new_time)
+
+    @Slot(int)
+    def _handle_vlc_time_changed(self, time_ms):
         # Master clock timer handles position updates during playback.
         # We keep this handler attached in case VLC reports a new time while paused.
-        if not self._is_playing and event.u.new_time >= 0:
-            self._update_position_widgets(event.u.new_time)
+        if self._is_media_loaded and not self._is_playing and time_ms >= 0:
+            self._update_position_widgets(time_ms)
 
     def _on_vlc_end_reached(self, event):
         """Forward VLC's worker-thread callback to the Qt UI thread."""
@@ -582,10 +617,13 @@ class VideoPlayerWidget(QWidget):
         self.master_clock_timer.stop()
         self._is_playing = False
         self._has_reached_end = True
-        self._restoring_end_frame = True
+        self._restoring_end_frame = not self._is_audio_only
         self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
         self._set_current_time_ms(self.total_duration_ms)
         self.playback_stopped.emit()
+
+        if self._is_audio_only:
+            return
 
         # Avoid seeking into VLC's Ended boundary again. This is the latest
         # reliably decodable paused frame while the UI still reports 100%.
@@ -598,10 +636,19 @@ class VideoPlayerWidget(QWidget):
         )
 
     def _on_vlc_error(self, event=None):
+        self._vlc_error_signal.emit()
+
+    @Slot()
+    def _handle_vlc_error(self):
         print("[ERROR VLC] An error was encountered.")
         self.file_label.setText(tr("video.playback_error"))
         self.play_button.setEnabled(False)
         self._is_media_loaded = False
+        self._is_playing = False
+        self.master_clock_timer.stop()
+        self._video_output_generation += 1
+        self._media_restart_generation += 1
+        self._pending_media_reload = None
         self.total_duration_ms = 0
         self.current_time_ms = 0
         self._update_position_widgets()
@@ -806,7 +853,8 @@ class VideoPlayerWidget(QWidget):
         self.media_player.stop()
         media = self.instance.media_new(self._current_video_path)
         self.media_player.set_media(media)
-        self._attach_video_to_frame()
+        if not self._is_audio_only:
+            self._attach_video_to_frame()
         self._auto_pause_on_play = False
         self.media_player.play()
         self.current_time_ms = display_position
@@ -830,7 +878,8 @@ class VideoPlayerWidget(QWidget):
         display_position = pending["display_position_ms"]
         play_after_reload = pending["play_after_reload"]
 
-        self._attach_video_to_frame()
+        if not self._is_audio_only:
+            self._attach_video_to_frame()
         self.media_player.set_time(safe_position)
 
         if play_after_reload:

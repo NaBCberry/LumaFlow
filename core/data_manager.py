@@ -2,6 +2,23 @@ import pandas as pd
 import numpy as np
 from utils.performance import perf_monitor
 
+
+EMPTY_MARKER_TOKENS = frozenset({"", "0", "0.0", "null", "none", "nan", "<na>"})
+
+
+def normalize_marker_value(value) -> str:
+    if pd.isna(value):
+        return ""
+    text = str(value).strip()
+    return "" if text.casefold() in EMPTY_MARKER_TOKENS else text
+
+
+def normalize_marker_series(values: pd.Series) -> pd.Series:
+    marker_values = values.astype('string').fillna("").str.strip()
+    empty_mask = marker_values.str.casefold().isin(EMPTY_MARKER_TOKENS)
+    return marker_values.mask(empty_mask, "").astype(object)
+
+
 class DataManager:
     def __init__(self):
         self.main_df = pd.DataFrame()
@@ -11,11 +28,26 @@ class DataManager:
         try:
             self.main_df = pd.read_csv(file_path)
             if 'frame_time_ms' not in self.main_df.columns: self.main_df = pd.DataFrame(); return False
-            if 'marker' not in self.main_df.columns: self.main_df['marker'] = ""
-            self.main_df['marker'] = self.main_df['marker'].fillna("")
+            self.ensure_marker_column()
             return True
         except Exception as e: print(f"Error loading CSV: {e}"); self.main_df = pd.DataFrame(); return False
     
+    def ensure_marker_column(self):
+        """Keep marker values string-compatible even when CSV inference chose int64."""
+        if 'marker' not in self.main_df.columns:
+            self.main_df['marker'] = pd.Series(
+                "",
+                index=self.main_df.index,
+                dtype=object,
+            )
+            return
+
+        self.main_df['marker'] = normalize_marker_series(self.main_df['marker'])
+
+    def set_marker_at_index(self, frame_index, name):
+        self.ensure_marker_column()
+        self.main_df.at[frame_index, 'marker'] = normalize_marker_value(name)
+
     def get_full_data(self) -> pd.DataFrame: return self.main_df.copy()
     
     def get_segment(self, start_ms: float, end_ms: float) -> pd.DataFrame:
@@ -26,13 +58,13 @@ class DataManager:
     def add_marker(self, at_ms: float, name: str):
         if self.main_df.empty: return
         closest_index = self.main_df.iloc[(self.main_df['frame_time_ms'] - at_ms).abs().argsort()[:1]].index[0]
-        self.main_df.loc[closest_index, 'marker'] = name
+        self.set_marker_at_index(closest_index, name)
         
     def update_marker(self, at_ms: float, name: str):
         """更新指定时间的标记"""
         if self.main_df.empty: return
         closest_index = self.main_df.iloc[(self.main_df['frame_time_ms'] - at_ms).abs().argsort()[:1]].index[0]
-        self.main_df.loc[closest_index, 'marker'] = name
+        self.set_marker_at_index(closest_index, name)
         
     def get_marker_times(self) -> list:
         if self.main_df.empty: return []
