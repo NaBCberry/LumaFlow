@@ -475,7 +475,7 @@ python -m unittest discover -s tests -p "*test*.py"
 Remove-Item Env:QT_QPA_PLATFORM
 ```
 
-测试同时包含 `*_test.py` 和 `test_*.py` 两种命名，不能仅使用其中一种模式。v1.9.0 在 2026-09-08 通过全部 152 项测试，并使用真实 MP3/MP4 验证 FFmpeg 解码和 Mel 频谱计算。VLC 加载、定位、播放及全屏媒体切换另在 Qt `minimal` 后端下完成静音检查；`offscreen` 用于单元测试和截图，不作为原生播放器验收环境。
+测试同时包含 `*_test.py` 和 `test_*.py` 两种命名，不能仅使用其中一种模式。v1.9.0 在 2026-09-08 通过全部 155 项测试，并使用真实 MP3/MP4 验证 FFmpeg 解码和 Mel 频谱计算。VLC 加载、定位、播放及全屏媒体切换另在 Qt `minimal` 后端下完成静音检查；`offscreen` 用于单元测试和截图，不作为原生播放器验收环境。
 
 上述检查不代替灯光设备实机联调或 Windows 便携包验收；源码版本更新不代表已上传新的安装包。
 

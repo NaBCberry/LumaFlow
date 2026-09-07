@@ -61,6 +61,7 @@ class AppLogic(QObject):
         self.current_edit_video_path = None
         self.source_audio_duration_ms = None
         self.edit_audio_duration_ms = None
+        self.audio_channel_modes = {'source': 'mono', 'edit': 'mono'}
 
         # Device managers
         self.serial_device = SerialDeviceManager()
@@ -506,6 +507,7 @@ class AppLogic(QObject):
             self.current_edit_video_path = video_path
             self.edit_audio_duration_ms = None
 
+        self.audio_channel_modes[timeline_type] = 'mono'
         self.audio_manager.extract_audio(video_path, 'mono')
         self.status_message_changed.emit(
             tr("status.processing_audio_from_video", timeline=self._timeline_display_name(timeline_type))
@@ -514,20 +516,23 @@ class AppLogic(QObject):
     @Slot(str, str, str)
     def change_audio_channel_mode(self, timeline_type: str, video_path: str, mode: str):
         """Re-process audio with different channel mode"""
+        self.audio_channel_modes[timeline_type] = mode
         self.audio_manager.extract_audio(video_path, mode)
         self.status_message_changed.emit(tr("status.reprocessing_audio_mode", mode=mode))
 
     @Slot(str, object)
     def _on_audio_processed(self, video_path: str, audio_data):
         """Route processed audio to correct timeline"""
-        if video_path == self.current_source_video_path:
+        if (video_path == self.current_source_video_path
+                and audio_data.channel_mode == self.audio_channel_modes['source']):
             self.source_audio_processed.emit(audio_data)
             self.source_audio_duration_ms = audio_data.duration_ms
             duration_sec = audio_data.duration_ms / 1000.0
             self.status_message_changed.emit(
                 tr("status.source_audio_loaded", sample_rate=audio_data.sample_rate, duration=duration_sec)
             )
-        if video_path == self.current_edit_video_path:
+        if (video_path == self.current_edit_video_path
+                and audio_data.channel_mode == self.audio_channel_modes['edit']):
             self.edit_audio_processed.emit(audio_data)
             self.edit_audio_duration_ms = audio_data.duration_ms
             duration_sec = audio_data.duration_ms / 1000.0

@@ -26,11 +26,12 @@
 - Cancelled stale media-load timers and video-refresh callbacks when switching reference files.
 - Delivered audio analysis results, progress, and failures to both workspaces when they share the same reference file, while ignoring callbacks for replaced files.
 - Routed VLC time and error callbacks through Qt signals to avoid touching widgets and timers from VLC worker threads.
+- Preserved independent audio channel modes for workspaces sharing a reference, including synchronous cached results and late results from a previous mode.
 
 ### Release verification
 
 - Included both `*_test.py` and `test_*.py` in the full regression command and stopped ignoring tests under `tests/`.
-- Passed all 152 automated tests, including legacy positional render calls, Qt-thread callback routing, and reference-media routing and switching regressions.
+- Passed all 155 automated tests, including legacy positional render calls, Qt-thread callback routing, and reference-media routing and switching regressions.
 - Verified real MP3 and MP4 decoding and Mel spectrogram generation with FFmpeg.
 - Checked real VLC loading, seeking, playback, and fullscreen media switching with the Qt `minimal` backend and dummy outputs; native desktop and portable-package acceptance remain separate checks.
 

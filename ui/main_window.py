@@ -1599,7 +1599,7 @@ class MainWindow(QMainWindow):
             )
             if reply == QMessageBox.Yes:
                 mode_code = self.source_audio_controls.channel_combo.currentData() or "stereo"
-                self.logic.audio_manager.extract_audio(self.logic.current_source_video_path, mode_code)
+                self.logic.change_audio_channel_mode('source', self.logic.current_source_video_path, mode_code)
 
     def _on_edit_audio_params_changed(self, timeline_type: str, params: dict):
         """Handle processing parameters change"""
@@ -1616,7 +1616,7 @@ class MainWindow(QMainWindow):
             )
             if reply == QMessageBox.Yes:
                 mode_code = self.edit_audio_controls.channel_combo.currentData() or "stereo"
-                self.logic.audio_manager.extract_audio(self.logic.current_edit_video_path, mode_code)
+                self.logic.change_audio_channel_mode('edit', self.logic.current_edit_video_path, mode_code)
 
     def _on_source_audio_data_ready(self, audio_data):
         # Hide progress bar after completion
