@@ -438,6 +438,7 @@ LumaFlow 可以直接读取音频文件，或从视频中提取音频并显示 M
 - “全局亮度调制”只在输出阶段缩放 RGB，不修改灯光序列文件，也不改变 function。
 - BLE 扫描失败时，先确认当前环境已安装 `bleak`，再检查 Windows 蓝牙、设备占用和距离。
 - BLE、UDP 和串口只负责编辑器到发射器的控制链路；发射器到荧光棒仍使用 433MHz，需要单独完成天线覆盖测试。
+- 控制链路的传输参数、TLV 帧格式、授权帧与历史 22 字节驱动协议见 [`docs/device-output-protocol.md`](docs/device-output-protocol.md)。
 
 ---
 
