@@ -129,7 +129,14 @@ MAC|expire_time|signature_hex
 - `expire_time`：十进制 Unix 时间戳，必须落在 uint32 范围
 - `signature_hex`：偶数个十六进制字符，解码后 1..72 字节
 
-连接成功后会发送 AUTH 数据；断开重连会重新认证。
+编辑器行为（`app_logic.py::connect_serial`）：
+
+- 授权码**留空**：不发送 AUTH 帧，直接建立控制链路，认证状态显示「未发送」。适用于不校验授权的发射器。
+- 授权码**非空且合法**：每次「连接」都会发送 AUTH，断开重连会重新认证，认证状态显示「已发送」。
+- 授权码**非空但格式非法**，或 `expire_time` 早于本机当前时间：显示「配置错误」并**中止连接**，不会发起连接请求。
+- AUTH 发送失败时主动断开并提示 `Connection failed: AUTH send failed`。
+
+编辑器只做本地格式与有效期检查，不产生也不校验签名。
 
 ### 2.5 帧节流与去重（编辑器侧）
 
@@ -263,16 +270,39 @@ message ControlDeviceLightRequest {
 
 ---
 
-## 6. 兼容性与变更约束
+## 6. 固件侧对照（11C3 参考实现）
+
+开源固件 [`llly712/11C3`](https://github.com/llly712/11C3)（ESP32-C3 + F113 433MHz 发射板）实现了本协议的服务端，可用于交叉验证与实机联调：
+
+| 项 | 11C3 固件 | 与本仓库的关系 |
+|----|-----------|----------------|
+| TLV 常量 | `0xEB 0x90` / `0xED`、`CMD_STREAM 0xD8`、`CMD_AUTH 0xE0`、20 字节载荷、26 字节帧 | 与 `core/serial_protocol.py` 完全一致；`firmware/11C3/src/protocol.h` 注释即标明对齐本仓库 |
+| 校验 | `(len + cmd + sum(payload)) & 0xFF` | 一致 |
+| BLE 服务 | 服务 `7e570001-…`、写特征 `7e570002-…` | 与 `BLE_SERVICE_UUID` / `BLE_CHARACTERISTIC_UUID` 一致 |
+| 广播 | 主广播带 128 位 LumaFlow 服务 UUID，扫描响应带完整设备名 `11C3-xxxx` | 本仓库按「名字前缀 `LumaFlow` 或服务 UUID」过滤，故靠 UUID 命中 |
+| 空口 | 433.92MHz OOK、位时长 250µs、RMT 驱动 F113 | 频率由硬件模块固定；固件只调编码模式（NRZ/UART）、RF 波特率 300–20000、前导 0–32 字节、电平反转 |
+| AUTH 处理 | 非 STREAM 帧只写一行日志后丢弃，不解析 payload、不验签 | 授权码不影响能否驱动该设备 |
+
+接入注意事项：
+
+- 该固件默认**关闭 WiFi**（`config.h` 中 `ENABLE_WIFI` 被注释），因此 UDP 通道不可用，只能走串口或 BLE。
+- 串口固件侧为 `Serial.begin(115200)`；本仓库面板默认 `512000`，虽在 ESP32-C3 原生 USB-CDC 下通常不影响，联调时建议先统一为 `115200`。
+- 其私有控制服务 `c3a50001-…`（配套安卓 App）走文本命令 `PLAY` / `STOP` / `COLOR:` / `BRIGHT:`，与本仓库的二进制 TLV 是两条独立链路。
+- 该硬件的 BLE 特征无加密/认证属性，固件也未启用配对绑定，BLE 侧不存在连接准入控制。
+
+---
+
+## 7. 兼容性与变更约束
 
 - 通道显示选择不得修改 CSV 或设备协议（见 `CONTRIBUTING.md`）。
 - 设备输出改动需要独立的**实机验证**；`tests/test_serial_protocol.py` 只覆盖组帧与授权解析，不覆盖空口效果。
 - 亮度调制只在输出阶段生效，不得回写灯光序列。
+- 授权码为可选：留空表示跳过 AUTH，不得据此改变 STREAM 载荷格式。
 - 用户可见文字需同时更新 `resources/i18n/zh-CN.json` 与 `en-US.json`。
 
 ---
 
-## 7. 源码索引
+## 8. 源码索引
 
 | 内容 | 位置 |
 |------|------|

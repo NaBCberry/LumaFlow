@@ -590,13 +590,21 @@ class AppLogic(QObject):
 
     @Slot(str, int)
     def connect_serial(self, port, baud_rate):
-        """Queue a serial, UDP, or BLE connection and AUTH operation."""
-        try:
-            auth_frame = self.build_auth_packet()
-        except ValueError as exc:
-            self.serial_auth_status_changed.emit("Config Error")
-            self.serial_connection_changed.emit(False, f"Connection failed: {exc}")
-            return
+        """Queue a serial, UDP, or BLE connection and AUTH operation.
+
+        An empty AUTH LIC skips the AUTH frame so transmitters without license
+        enforcement can be driven directly; a non-empty but malformed or
+        expired LIC is still reported as ``Config Error``.
+        """
+        if self.serial_auth_lic:
+            try:
+                auth_frame = self.build_auth_packet()
+            except ValueError as exc:
+                self.serial_auth_status_changed.emit("Config Error")
+                self.serial_connection_changed.emit(False, f"Connection failed: {exc}")
+                return
+        else:
+            auth_frame = b""
 
         self.serial_auth_status_changed.emit("Not Sent")
         self.serial_connection_busy_changed.emit(True)

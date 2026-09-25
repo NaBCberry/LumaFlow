@@ -15,7 +15,12 @@ class DeviceOutputWorker(QObject):
 
     @Slot(str, int, bytes)
     def connect_to_device(self, target, baud_rate, auth_frame):
-        """Connect and authenticate without blocking the Qt UI thread."""
+        """Connect without blocking the Qt UI thread.
+
+        ``auth_frame`` may be empty when no AUTH LIC is configured; the control
+        link is then established without sending an AUTH frame, which suits
+        transmitters that do not enforce licensing.
+        """
         try:
             if baud_rate == -1:
                 result = self.serial_device.connect(target, transport="udp")
@@ -32,16 +37,20 @@ class DeviceOutputWorker(QObject):
                 self.auth_status_changed.emit("Not Sent")
                 return
 
-            if not self.serial_device.send_data(auth_frame, count_frame=False):
-                self.auth_status_changed.emit("Send Failed")
-                if self.serial_device.is_connected():
-                    self.serial_device.disconnect(
-                        message="Connection failed: AUTH send failed",
-                        emit_signal=True,
-                    )
-                return
+            if auth_frame:
+                if not self.serial_device.send_data(auth_frame, count_frame=False):
+                    self.auth_status_changed.emit("Send Failed")
+                    if self.serial_device.is_connected():
+                        self.serial_device.disconnect(
+                            message="Connection failed: AUTH send failed",
+                            emit_signal=True,
+                        )
+                    return
+                self.auth_status_changed.emit("Sent")
+            else:
+                # No AUTH LIC configured: skip authentication and keep the link.
+                self.auth_status_changed.emit("Not Sent")
 
-            self.auth_status_changed.emit("Sent")
             if baud_rate == -1:
                 endpoint = self.serial_device.get_udp_endpoint_label()
                 self.serial_device.mark_connected(f"Connected to {endpoint} via UDP")

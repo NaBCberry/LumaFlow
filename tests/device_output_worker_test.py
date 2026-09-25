@@ -66,6 +66,23 @@ class DeviceOutputWorkerTests(unittest.TestCase):
         self.assertEqual(("AA:BB", 512000, "ble"), device.connect_args)
         self.assertIn("via BLE", device.marked_message)
 
+    def test_connect_without_auth_frame_skips_auth_and_keeps_link(self):
+        device = FakeDeviceManager()
+        worker = DeviceOutputWorker(device, None, lambda frame: frame)
+        statuses = []
+        finished = []
+        worker.auth_status_changed.connect(statuses.append)
+        worker.operation_finished.connect(lambda: finished.append(True))
+
+        worker.connect_to_device("AA:BB", -2, b"")
+
+        self.assertEqual(("AA:BB", 512000, "ble"), device.connect_args)
+        self.assertEqual([], device.sent)
+        self.assertEqual(["Not Sent"], statuses)
+        self.assertIn("via BLE", device.marked_message)
+        self.assertTrue(device.connected)
+        self.assertEqual([True], finished)
+
 
 if __name__ == "__main__":
     unittest.main()
